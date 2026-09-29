@@ -638,6 +638,9 @@ class Database {
         youtube_tokens TEXT,
         youtube_channel_id TEXT,
         youtube_channel_title TEXT,
+        youtube_video_count INTEGER,
+        youtube_view_count INTEGER,
+        youtube_stats_updated_at TEXT,
         automation_paused INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -676,13 +679,18 @@ class Database {
     await this.ensureColumns('channel_profiles', {
       content_language: "TEXT DEFAULT 'fr'"
     });
+    await this.ensureColumns('channels', {
+      youtube_video_count: 'INTEGER',
+      youtube_view_count: 'INTEGER',
+      youtube_stats_updated_at: 'TEXT'
+    });
 
     // Insert default settings
     await this.insertDefaultSettings();
   }
 
   async ensureColumns(tableName, columns) {
-    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits', 'channel_profiles']);
+    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits', 'channel_profiles', 'channels']);
     if (!allowedTables.has(tableName)) throw new Error(`Unsupported migration table: ${tableName}`);
     const existing = new Set((await this.getAllRows(`PRAGMA table_info(${tableName})`)).map(column => column.name));
     for (const [columnName, definition] of Object.entries(columns)) {
@@ -1708,9 +1716,35 @@ class Database {
       `UPDATE channels SET youtube_tokens = ?, status = 'active',
         youtube_channel_id = COALESCE(?, youtube_channel_id),
         youtube_channel_title = COALESCE(?, youtube_channel_title),
+        youtube_video_count = COALESCE(?, youtube_video_count),
+        youtube_view_count = COALESCE(?, youtube_view_count),
+        youtube_stats_updated_at = CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE youtube_stats_updated_at END,
         updated_at = datetime('now')
        WHERE id = ?`,
-      [JSON.stringify(merged), youtubeChannel?.id || null, youtubeChannel?.title || null, id]
+      [
+        JSON.stringify(merged),
+        youtubeChannel?.id || null,
+        youtubeChannel?.title || null,
+        youtubeChannel?.videoCount ?? null,
+        youtubeChannel?.viewCount ?? null,
+        youtubeChannel?.videoCount ?? null,
+        id
+      ]
+    );
+    return this.getChannelById(id);
+  }
+
+  async updateChannelYouTubeStats(id, youtubeChannel) {
+    await this.executeQuery(
+      `UPDATE channels SET
+        youtube_channel_id = COALESCE(?, youtube_channel_id),
+        youtube_channel_title = COALESCE(?, youtube_channel_title),
+        youtube_video_count = ?,
+        youtube_view_count = ?,
+        youtube_stats_updated_at = datetime('now'),
+        updated_at = datetime('now')
+       WHERE id = ?`,
+      [youtubeChannel?.id || null, youtubeChannel?.title || null, youtubeChannel?.videoCount ?? null, youtubeChannel?.viewCount ?? null, id]
     );
     return this.getChannelById(id);
   }

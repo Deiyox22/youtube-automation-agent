@@ -407,6 +407,9 @@ label:has(input:disabled) > span { color: var(--muted); }
 .channel-card { display: flex; flex-direction: column; gap: 10px; }
 .channel-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .channel-card-heading strong { font-size: 15px; line-height: 1.3; }
+.channel-card-stats { display: flex; gap: 18px; padding: 2px 0; }
+.channel-card-stats span { color: var(--muted); font-size: 11.5px; }
+.channel-card-stats strong { color: var(--text); font-size: 14px; font-weight: 700; margin-right: 4px; }
 .channel-card-meta { color: var(--muted); font-size: 12px; display: grid; gap: 4px; }
 .channel-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; }
 

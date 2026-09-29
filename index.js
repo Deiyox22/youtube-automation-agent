@@ -512,9 +512,16 @@ class YouTubeAutomationAgent {
           try {
             oauth2Client.setCredentials(tokens);
             const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-            const response = await youtube.channels.list({ part: 'snippet', mine: true });
+            const response = await youtube.channels.list({ part: 'snippet,statistics', mine: true });
             const item = response.data?.items?.[0];
-            if (item) youtubeChannel = { id: item.id, title: item.snippet?.title };
+            if (item) {
+              youtubeChannel = {
+                id: item.id,
+                title: item.snippet?.title,
+                videoCount: item.statistics?.videoCount !== undefined ? Number(item.statistics.videoCount) : null,
+                viewCount: item.statistics?.viewCount !== undefined ? Number(item.statistics.viewCount) : null
+              };
+            }
           } catch (lookupError) {
             this.logger.warn(`Could not look up the connected channel's title: ${lookupError.message}`);
           }
@@ -801,6 +808,34 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
     this.app.delete('/api/channels/:channelId', protect, async (req, res) => {
       await this.db.deleteChannel(req.params.channelId);
       res.json({ success: true });
+    });
+
+    this.app.post('/api/channels/:channelId/refresh', protect, async (req, res) => {
+      try {
+        const channel = await this.db.getChannelById(req.params.channelId);
+        if (!channel) return res.status(404).json({ success: false, error: 'Channel not found' });
+        if (!channel.youtubeTokens?.refresh_token) {
+          return res.status(409).json({ success: false, error: 'This channel is not connected to YouTube yet' });
+        }
+        const config = this.credentials?.getYouTubeOAuthConfig?.();
+        if (!config) return res.status(400).json({ success: false, error: 'YouTube OAuth is not configured' });
+        const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
+        oauth2Client.setCredentials(channel.youtubeTokens);
+        const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+        const response = await youtube.channels.list({ part: 'snippet,statistics', mine: true });
+        const item = response.data?.items?.[0];
+        if (!item) return res.status(502).json({ success: false, error: 'YouTube did not return a channel for this connection' });
+        const updated = await this.db.updateChannelYouTubeStats(channel.id, {
+          id: item.id,
+          title: item.snippet?.title,
+          videoCount: item.statistics?.videoCount !== undefined ? Number(item.statistics.videoCount) : null,
+          viewCount: item.statistics?.viewCount !== undefined ? Number(item.statistics.viewCount) : null
+        });
+        res.json({ success: true, result: this.sanitizeChannel(updated) });
+      } catch (error) {
+        this.logger.error('Failed to refresh channel YouTube stats', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
     });
 
     this.app.get('/api/jobs/:jobId', async (req, res) => {

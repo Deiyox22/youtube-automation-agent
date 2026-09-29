@@ -221,24 +221,35 @@ function renderChannels(channels) {
     container.innerHTML = empty('Aucune chaîne pour le moment. Ajoutez-en une pour commencer.');
     return;
   }
-  container.innerHTML = channels.map(channel => `
+  container.innerHTML = channels.map(channel => {
+    const displayName = channel.youtube_channel_title || channel.name;
+    const hasStats = channel.youtube_video_count !== null && channel.youtube_video_count !== undefined;
+    return `
     <article class="panel channel-card" data-channel-id="${escapeHTML(channel.id)}">
       <div class="channel-card-heading">
-        <div><strong>${escapeHTML(channel.name)}</strong><div class="meta-line">${statusChip(channel.status)}</div></div>
+        <div>
+          <strong>${escapeHTML(displayName)}</strong>
+          ${channel.youtube_channel_title && channel.youtube_channel_title !== channel.name ? `<div class="meta-line">${escapeHTML(channel.name)}</div>` : ''}
+          <div class="meta-line">${statusChip(channel.status)}</div>
+        </div>
       </div>
+      ${hasStats ? `<div class="channel-card-stats">
+        <span><strong>${Number(channel.youtube_video_count).toLocaleString('fr-FR')}</strong> vidéos</span>
+        <span><strong>${Number(channel.youtube_view_count || 0).toLocaleString('fr-FR')}</strong> vues</span>
+      </div>` : ''}
       <div class="channel-card-meta">
         <span>${escapeHTML(CHANNEL_LANGUAGE_LABELS[channel.content_language] || channel.content_language || 'Français')}</span>
         <span>${escapeHTML(channel.goal || 'Aucun objectif défini')}</span>
-        ${channel.youtube_channel_title ? `<span>YouTube : ${escapeHTML(channel.youtube_channel_title)}</span>` : ''}
       </div>
       <div class="channel-card-actions">
         ${channel.youtubeConnected
-          ? '<span class="status success">YouTube connectée</span>'
+          ? '<span class="status success">YouTube connectée</span><button type="button" class="text-button" data-refresh-channel="' + escapeHTML(channel.id) + '">Actualiser</button>'
           : `<a class="button secondary small" href="/auth/youtube/start?channelId=${encodeURIComponent(channel.id)}">Connecter YouTube</a>`}
         <button type="button" class="text-button" data-edit-channel="${escapeHTML(channel.id)}">Modifier</button>
         <button type="button" class="text-button danger-text" data-delete-channel="${escapeHTML(channel.id)}">Supprimer</button>
       </div>
-    </article>`).join('');
+    </article>`;
+  }).join('');
 }
 
 function renderReadiness(readiness = {}) {
@@ -1716,6 +1727,14 @@ document.addEventListener('click', async event => {
   if (deleteChannel) {
     if (!confirm('Supprimer cette chaîne ? Sa connexion YouTube sera retirée. Le contenu déjà généré reste sur le disque.')) return;
     await mutate(`/api/channels/${encodeURIComponent(deleteChannel.dataset.deleteChannel)}`, 'DELETE', undefined, 'Chaîne supprimée.').catch(() => {});
+    return;
+  }
+
+  const refreshChannel = event.target.closest('[data-refresh-channel]');
+  if (refreshChannel) {
+    refreshChannel.disabled = true;
+    await mutate(`/api/channels/${encodeURIComponent(refreshChannel.dataset.refreshChannel)}/refresh`, 'POST', {}, 'Statistiques YouTube actualisées.').catch(() => {});
+    refreshChannel.disabled = false;
   }
 });
 
