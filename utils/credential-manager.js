@@ -48,8 +48,9 @@ class CredentialManager {
     // lets the connection survive that: the OAuth callback prints it once so
     // it can be saved as a platform environment variable, and it's used here
     // whenever the local token file didn't already provide one.
-    if (!this.tokens.youtube?.refresh_token && process.env.YOUTUBE_REFRESH_TOKEN) {
-      this.tokens.youtube = { ...(this.tokens.youtube || {}), refresh_token: process.env.YOUTUBE_REFRESH_TOKEN };
+    const envRefreshToken = process.env.YOUTUBE_REFRESH_TOKEN?.trim();
+    if (!this.tokens.youtube?.refresh_token && envRefreshToken) {
+      this.tokens.youtube = { ...(this.tokens.youtube || {}), refresh_token: envRefreshToken };
     }
   }
 
@@ -538,9 +539,9 @@ class CredentialManager {
   // the OAuth client entirely through environment variables and finish the
   // consent step at GET /auth/youtube/start on the running app's own URL.
   getYouTubeOAuthConfig() {
-    const clientId = this.credentials.youtube?.client_id || process.env.YOUTUBE_CLIENT_ID;
-    const clientSecret = this.credentials.youtube?.client_secret || process.env.YOUTUBE_CLIENT_SECRET;
-    const redirectUri = process.env.YOUTUBE_REDIRECT_URI || this.credentials.youtube?.redirect_uris?.[0];
+    const clientId = this.credentials.youtube?.client_id || process.env.YOUTUBE_CLIENT_ID?.trim();
+    const clientSecret = this.credentials.youtube?.client_secret || process.env.YOUTUBE_CLIENT_SECRET?.trim();
+    const redirectUri = process.env.YOUTUBE_REDIRECT_URI?.trim() || this.credentials.youtube?.redirect_uris?.[0];
 
     if (!clientId || !clientSecret || !redirectUri) {
       return null;
