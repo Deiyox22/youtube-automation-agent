@@ -42,6 +42,15 @@ class CredentialManager {
     } catch (error) {
       this.tokens = {};
     }
+
+    // Hosted deployments with an ephemeral filesystem (e.g. Render's free
+    // tier) lose config/tokens.json on every redeploy. YOUTUBE_REFRESH_TOKEN
+    // lets the connection survive that: the OAuth callback prints it once so
+    // it can be saved as a platform environment variable, and it's used here
+    // whenever the local token file didn't already provide one.
+    if (!this.tokens.youtube?.refresh_token && process.env.YOUTUBE_REFRESH_TOKEN) {
+      this.tokens.youtube = { ...(this.tokens.youtube || {}), refresh_token: process.env.YOUTUBE_REFRESH_TOKEN };
+    }
   }
 
   async saveCredentials() {

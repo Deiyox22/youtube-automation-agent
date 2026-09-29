@@ -485,12 +485,25 @@ class YouTubeAutomationAgent {
         const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
         const { tokens } = await oauth2Client.getToken(code);
         await this.credentials.saveYouTubeTokens(tokens);
+        const escapeHTML = value => String(value ?? '')
+          .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+        const persistenceNotice = tokens.refresh_token ? `
+            <div style="text-align:left;max-width:640px;margin:24px auto;padding:16px 20px;border:1px solid #e0a800;border-radius:8px;background:#fff8e1;">
+              <p><strong>Important si vous êtes hébergé·e sur un disque non persistant (ex. Render gratuit) :</strong>
+              cette connexion est sauvegardée sur le disque local de l'application, qui est effacé à chaque redéploiement
+              (nouveau push de code, redéploiement manuel, etc.). Pour éviter d'avoir à refaire cette autorisation à chaque fois,
+              copiez la valeur ci-dessous dans une variable d'environnement <code>YOUTUBE_REFRESH_TOKEN</code> sur votre
+              plateforme d'hébergement, puis redéployez une fois :</p>
+              <textarea readonly onclick="this.select()" style="width:100%;min-height:70px;font-family:monospace;font-size:12px;padding:8px;box-sizing:border-box;">${escapeHTML(tokens.refresh_token)}</textarea>
+              <p style="font-size:13px;color:#7a5b00;">Cette valeur est un secret équivalent à un mot de passe — ne la partagez qu'avec la configuration de votre hébergeur.</p>
+            </div>` : '';
         res.send(`
           <html><body style="font-family:Arial,sans-serif;text-align:center;padding:50px;">
             <h1>✅ YouTube connecté</h1>
             <p>L’application redémarre pour appliquer ce changement. Vous allez être redirigé(e) automatiquement dans <span id="countdown">20</span>s.</p>
             <p><strong>N’actualisez pas cette page</strong> — cliquez plutôt sur le lien ci-dessous si vous ne voulez pas attendre.</p>
             <p><a href="/">Aller au tableau de bord →</a></p>
+            ${persistenceNotice}
             <script>
               let s = 20;
               const el = document.getElementById('countdown');
