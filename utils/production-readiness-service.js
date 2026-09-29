@@ -7,6 +7,7 @@ const { checkFFmpeg, runFFmpeg } = require('./ffmpeg');
 const { validateYouTubeMetadata } = require('./youtube-metadata-validator');
 const { Logger } = require('./logger');
 const { MediaGenerationService } = require('./media-generation-service');
+const { getYouTubeClientForChannel } = require('./youtube-client');
 
 const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
@@ -75,8 +76,8 @@ class ProductionReadinessService {
       checks.push(await this.executeCheck('video_provider', 'AI video provider', true, () => this.probeVideoProvider(tempDir, Boolean(options.includePaidVideo))));
       checks.push(await this.executeCheck('voice_narration', 'Voice narration', true, () => this.probeNarration(tempDir)));
       checks.push(await this.executeCheck('video_assembly', 'Audio/video assembly', true, () => this.probeVideoAssembly(tempDir)));
-      checks.push(await this.executeCheck('youtube_access', 'YouTube channel access', true, () => this.probeYouTube()));
-      checks.push(await this.executeCheck('upload_metadata', 'Upload metadata', true, () => this.probeMetadata()));
+      checks.push(await this.executeCheck('youtube_access', 'YouTube channel access', true, () => this.probeYouTube(options.channelId || null)));
+      checks.push(await this.executeCheck('upload_metadata', 'Upload metadata', true, () => this.probeMetadata(options.channelId || null)));
 
       const blockingFailures = checks.filter(check => check.blocking && check.status === 'failed');
       const warnings = checks.filter(check =>
@@ -231,9 +232,13 @@ class ProductionReadinessService {
     return { message: 'FFmpeg created and decoded a local MP4 containing audio and video.', details: { bytes: buffer.length } };
   }
 
-  async probeYouTube() {
+  async probeYouTube(channelId = null) {
     if (this.probes.youtube) return this.probes.youtube();
-    const youtube = this.credentialManager.getYouTubeClient();
+    let legacyClient = null;
+    if (!channelId) {
+      try { legacyClient = this.credentialManager.getYouTubeClient(); } catch (_error) { legacyClient = null; }
+    }
+    const youtube = await getYouTubeClientForChannel(this.db, this.credentialManager, channelId, legacyClient);
     const response = await youtube.channels.list({ part: 'snippet,status', mine: true, maxResults: 1 });
     const channel = response.data?.items?.[0];
     if (!channel) throw new Error('The authorized Google account does not expose a YouTube channel');
@@ -243,9 +248,9 @@ class ProductionReadinessService {
     };
   }
 
-  async probeMetadata() {
+  async probeMetadata(channelId = null) {
     if (this.probes.metadata) return this.probes.metadata();
-    const queue = await this.db.getPublishQueue();
+    const queue = await this.db.getPublishQueue(channelId);
     const candidates = queue.length ? queue : [{ title: 'Production readiness test', metadata: { seo: { title: 'Production readiness test', description: 'A safe local metadata validation sample for YouTube upload readiness.', tags: ['readiness', 'youtube', 'automation'], metadata: { category: 22, language: 'en' } } } }];
     const invalid = [];
     let warnings = 0;

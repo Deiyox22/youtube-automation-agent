@@ -702,6 +702,10 @@ class Database {
     await this.ensureColumns('productions', { channel_id: 'TEXT' });
     await this.ensureColumns('publish_schedule', { channel_id: 'TEXT' });
     await this.ensureColumns('operator_runs', { channel_id: 'TEXT' });
+    await this.ensureColumns('analytics_reports', { channel_id: 'TEXT' });
+    await this.ensureColumns('performance_snapshots', { channel_id: 'TEXT' });
+    await this.ensureColumns('retention_snapshots', { channel_id: 'TEXT' });
+    await this.ensureColumns('learning_recommendations', { channel_id: 'TEXT' });
     await this.executeQuery(
       'CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_strategies_channel_id ON channel_strategies(channel_id)'
     );
@@ -729,12 +733,32 @@ class Database {
       `UPDATE operator_runs SET channel_id = (SELECT channel_id FROM channel_strategies WHERE channel_strategies.id = operator_runs.strategy_id)
        WHERE channel_id IS NULL`
     );
+    await this.executeQuery(
+      `UPDATE analytics_reports SET channel_id = (
+         SELECT ps.channel_id FROM publish_schedule ps WHERE ps.youtube_id = analytics_reports.video_id ORDER BY ps.published_at DESC LIMIT 1
+       ) WHERE channel_id IS NULL`
+    );
+    await this.executeQuery('UPDATE analytics_reports SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery(
+      `UPDATE performance_snapshots SET channel_id = (
+         SELECT p.channel_id FROM productions p WHERE p.id = performance_snapshots.production_id
+       ) WHERE channel_id IS NULL`
+    );
+    await this.executeQuery('UPDATE performance_snapshots SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery(
+      `UPDATE retention_snapshots SET channel_id = (
+         SELECT p.channel_id FROM productions p WHERE p.id = retention_snapshots.production_id
+       ) WHERE channel_id IS NULL`
+    );
+    await this.executeQuery('UPDATE retention_snapshots SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery('UPDATE learning_recommendations SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
   }
 
   async ensureColumns(tableName, columns) {
     const allowedTables = new Set([
       'production_scenes', 'channel_strategies', 'discoverability_audits', 'channel_profiles', 'channels',
-      'content_ideas', 'generation_jobs', 'productions', 'publish_schedule', 'operator_runs'
+      'content_ideas', 'generation_jobs', 'productions', 'publish_schedule', 'operator_runs',
+      'analytics_reports', 'performance_snapshots', 'retention_snapshots', 'learning_recommendations'
     ]);
     if (!allowedTables.has(tableName)) throw new Error(`Unsupported migration table: ${tableName}`);
     const existing = new Set((await this.getAllRows(`PRAGMA table_info(${tableName})`)).map(column => column.name));
@@ -2103,14 +2127,15 @@ class Database {
     
     await this.executeQuery(
       `INSERT INTO analytics_reports (
-        id, video_id, youtube_id, video_details, analytics_data,
+        id, video_id, youtube_id, channel_id, video_details, analytics_data,
         thumbnail_metrics, seo_metrics, insights, performance_score,
         performance_grade
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         report.videoId,
         report.youtubeId || null,
+        report.channelId || null,
         JSON.stringify(report.videoDetails),
         JSON.stringify(report.analytics),
         JSON.stringify(report.thumbnailMetrics),
@@ -2147,11 +2172,12 @@ class Database {
     const id = existing?.id || this.generateId('snapshot');
     await this.executeQuery(
       `INSERT INTO performance_snapshots (
-        id, video_id, production_id, measurement_window, published_at, metrics,
+        id, video_id, production_id, channel_id, measurement_window, published_at, metrics,
         content_attributes, baseline, deltas, confidence, simulated, measured_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(video_id, measurement_window) DO UPDATE SET
         production_id = excluded.production_id,
+        channel_id = excluded.channel_id,
         published_at = excluded.published_at,
         metrics = excluded.metrics,
         content_attributes = excluded.content_attributes,
@@ -2164,6 +2190,7 @@ class Database {
         id,
         snapshot.videoId,
         snapshot.productionId || null,
+        snapshot.channelId || null,
         snapshot.measurementWindow,
         snapshot.publishedAt || null,
         JSON.stringify(snapshot.metrics || {}),
@@ -2198,6 +2225,10 @@ class Database {
       conditions.push('measurement_window = ?');
       params.push(options.measurementWindow);
     }
+    if (options.channelId) {
+      conditions.push('channel_id = ?');
+      params.push(options.channelId);
+    }
     if (options.reliableOnly) conditions.push('simulated = 0');
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = await this.getAllRows(
@@ -2213,6 +2244,7 @@ class Database {
       ...row,
       videoId: row.video_id,
       productionId: row.production_id,
+      channelId: row.channel_id,
       measurementWindow: row.measurement_window,
       publishedAt: row.published_at,
       measuredAt: row.measured_at,
@@ -2232,12 +2264,13 @@ class Database {
     const id = existing?.id || this.generateId('retention');
     await this.executeQuery(
       `INSERT INTO retention_snapshots (
-        id, video_id, production_id, short_clip_id, title, surface,
+        id, video_id, production_id, channel_id, short_clip_id, title, surface,
         measurement_window, published_at, duration_seconds, points,
         scene_metrics, summary, confidence, measured_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(video_id, measurement_window) DO UPDATE SET
         production_id = excluded.production_id,
+        channel_id = excluded.channel_id,
         short_clip_id = excluded.short_clip_id,
         title = excluded.title,
         surface = excluded.surface,
@@ -2252,6 +2285,7 @@ class Database {
         id,
         snapshot.videoId,
         snapshot.productionId || null,
+        snapshot.channelId || null,
         snapshot.shortClipId || null,
         snapshot.title || null,
         snapshot.surface || 'long_form',
@@ -2288,6 +2322,10 @@ class Database {
       conditions.push('measurement_window = ?');
       params.push(options.measurementWindow);
     }
+    if (options.channelId) {
+      conditions.push('channel_id = ?');
+      params.push(options.channelId);
+    }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = Math.max(1, Math.min(50, Number(options.limit || 12)));
     const rows = await this.getAllRows(
@@ -2303,6 +2341,7 @@ class Database {
       ...row,
       videoId: row.video_id,
       productionId: row.production_id,
+      channelId: row.channel_id,
       shortClipId: row.short_clip_id,
       measurementWindow: row.measurement_window,
       publishedAt: row.published_at,
@@ -2322,9 +2361,10 @@ class Database {
     const id = existing?.id || this.generateId('learning');
     await this.executeQuery(
       `INSERT INTO learning_recommendations (
-        id, fingerprint, category, title, rationale, evidence, proposed_change, confidence
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, fingerprint, channel_id, category, title, rationale, evidence, proposed_change, confidence
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(fingerprint) DO UPDATE SET
+        channel_id = COALESCE(excluded.channel_id, learning_recommendations.channel_id),
         category = excluded.category,
         title = excluded.title,
         rationale = excluded.rationale,
@@ -2335,6 +2375,7 @@ class Database {
       [
         id,
         recommendation.fingerprint,
+        recommendation.channelId || null,
         recommendation.category,
         recommendation.title,
         recommendation.rationale,
@@ -2357,6 +2398,10 @@ class Database {
     if (options.status) {
       conditions.push('status = ?');
       params.push(options.status);
+    }
+    if (options.channelId) {
+      conditions.push('channel_id = ?');
+      params.push(options.channelId);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
@@ -2441,6 +2486,10 @@ class Database {
     if (options.productionId) {
       conditions.push('production_id = ?');
       params.push(options.productionId);
+    }
+    if (options.channelId) {
+      conditions.push('production_id IN (SELECT id FROM productions WHERE channel_id = ?)');
+      params.push(options.channelId);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = Math.max(1, Math.min(100, Number(options.limit || 25)));
@@ -2722,6 +2771,16 @@ class Database {
 
   async listEngagementInsights(options = {}) {
     const limit = Math.max(1, Math.min(50, Number(options.limit || 12)));
+    if (options.channelId) {
+      const rows = await this.getAllRows(
+        `SELECT ei.* FROM engagement_insights ei
+         JOIN publish_schedule ps ON ps.youtube_id = ei.video_id
+         WHERE ps.channel_id = ?
+         ORDER BY ei.updated_at DESC LIMIT ?`,
+        [options.channelId, limit]
+      );
+      return rows.map(row => this.parseEngagementInsight(row));
+    }
     const rows = await this.getAllRows(
       'SELECT * FROM engagement_insights ORDER BY updated_at DESC LIMIT ?',
       [limit]
@@ -2788,6 +2847,10 @@ class Database {
       conditions.push('status = ?');
       params.push(options.status);
     }
+    if (options.channelId) {
+      conditions.push('video_id IN (SELECT youtube_id FROM publish_schedule WHERE channel_id = ?)');
+      params.push(options.channelId);
+    }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
     const rows = await this.getAllRows(
@@ -2822,7 +2885,16 @@ class Database {
     return this.getReplyDraft(id);
   }
 
-  async countReplyDraftsPostedSince(isoTime) {
+  async countReplyDraftsPostedSince(isoTime, channelId = null) {
+    if (channelId) {
+      const row = await this.getRow(
+        `SELECT COUNT(*) AS posted FROM reply_drafts
+         WHERE status = 'posted' AND posted_at >= ?
+         AND video_id IN (SELECT youtube_id FROM publish_schedule WHERE channel_id = ?)`,
+        [isoTime, channelId]
+      );
+      return Number(row?.posted || 0);
+    }
     const row = await this.getRow(
       "SELECT COUNT(*) AS posted FROM reply_drafts WHERE status = 'posted' AND posted_at >= ?",
       [isoTime]
@@ -2842,6 +2914,14 @@ class Database {
       postedAt: row.posted_at,
       failureReason: row.failure_reason
     };
+  }
+
+  async getChannelIdForVideo(videoId) {
+    const row = await this.getRow(
+      'SELECT channel_id FROM publish_schedule WHERE youtube_id = ? ORDER BY published_at DESC LIMIT 1',
+      [videoId]
+    );
+    return row?.channel_id || null;
   }
 
   async getPublishedContentContext(youtubeId) {

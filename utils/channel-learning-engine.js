@@ -10,12 +10,14 @@ class ChannelLearningEngine {
   }
 
   async capture(performanceReport, context = {}, measurementWindow = 'rolling') {
+    const channelId = context.channelId || performanceReport.channelId || null;
     const metrics = this.normalizeMetrics(performanceReport, context);
     const attributes = this.extractAttributes(performanceReport, context);
     const prior = (await this.db.listPerformanceSnapshots({
       measurementWindow,
       reliableOnly: true,
-      excludeVideoId: performanceReport.videoId
+      excludeVideoId: performanceReport.videoId,
+      channelId
     })).filter(snapshot => (snapshot.contentAttributes?.surface || 'long_form') === attributes.surface);
     const baseline = this.calculateBaseline(prior);
     const simulated = Boolean(performanceReport.analytics?.simulated);
@@ -23,6 +25,7 @@ class ChannelLearningEngine {
     const snapshot = await this.db.savePerformanceSnapshot({
       videoId: performanceReport.videoId,
       productionId: context.productionId || null,
+      channelId,
       measurementWindow,
       publishedAt: performanceReport.videoDetails?.publishedAt || context.publishedAt || null,
       metrics,
@@ -38,7 +41,7 @@ class ChannelLearningEngine {
       return snapshot;
     }
 
-    await this.refreshRecommendations();
+    await this.refreshRecommendations(channelId);
     return snapshot;
   }
 
@@ -147,10 +150,10 @@ class ChannelLearningEngine {
     return 'low';
   }
 
-  async refreshRecommendations() {
+  async refreshRecommendations(channelId = null) {
     const [all, strategy] = await Promise.all([
-      this.db.listPerformanceSnapshots({ reliableOnly: true }),
-      this.db.getChannelStrategy ? this.db.getChannelStrategy() : Promise.resolve(null)
+      this.db.listPerformanceSnapshots({ reliableOnly: true, channelId }),
+      this.db.getChannelStrategy ? this.db.getChannelStrategy(channelId) : Promise.resolve(null)
     ]);
     const snapshots = this.preferredSnapshotPerVideo(all);
     if (snapshots.length < 2) return [];
@@ -164,7 +167,8 @@ class ChannelLearningEngine {
     for (const candidate of candidates) {
       saved.push(await this.db.saveLearningRecommendation({
         ...candidate,
-        fingerprint: this.fingerprint(candidate)
+        channelId,
+        fingerprint: this.fingerprint(candidate, channelId)
       }));
     }
     return saved;
@@ -293,12 +297,12 @@ class ChannelLearningEngine {
     return candidates;
   }
 
-  async getSummary() {
+  async getSummary(channelId = null) {
     const [snapshots, recommendations, retentionSnapshots, strategy] = await Promise.all([
-      this.db.listPerformanceSnapshots({ reliableOnly: true }),
-      this.db.listLearningRecommendations({ limit: 50 }),
-      this.db.listRetentionSnapshots ? this.db.listRetentionSnapshots({ limit: 12 }) : Promise.resolve([]),
-      this.db.getChannelStrategy ? this.db.getChannelStrategy() : Promise.resolve(null)
+      this.db.listPerformanceSnapshots({ reliableOnly: true, channelId }),
+      this.db.listLearningRecommendations({ limit: 50, channelId }),
+      this.db.listRetentionSnapshots ? this.db.listRetentionSnapshots({ limit: 12, channelId }) : Promise.resolve([]),
+      this.db.getChannelStrategy ? this.db.getChannelStrategy(channelId) : Promise.resolve(null)
     ]);
     const preferred = this.preferredSnapshotPerVideo(snapshots);
     return {
@@ -460,8 +464,9 @@ class ChannelLearningEngine {
     return { startDate: this.date(start), endDate: this.date(end) };
   }
 
-  fingerprint(candidate) {
+  fingerprint(candidate, channelId = null) {
     const identity = {
+      channelId,
       category: candidate.category,
       title: candidate.title,
       proposedChange: candidate.proposedChange

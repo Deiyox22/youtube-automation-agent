@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { Logger } = require('./logger');
 const { getContentLanguage, languageInstruction, isSupportedLanguage, DEFAULT_LANGUAGE } = require('./content-language');
+const { getYouTubeClientForChannel, channelHasYouTubeScope, sanitizeChannel } = require('./youtube-client');
 
 const FORCE_SSL_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl';
 const COMMENT_FLAGS = ['question', 'request', 'praise', 'correction', 'spam', 'scam', 'toxic'];
@@ -20,12 +21,22 @@ class AudienceEngagementService {
     this.syncDelayMs = Number(options.syncDelayMs ?? 2000);
     this.listCommentThreads = options.listCommentThreads || (params => this.defaultListCommentThreads(params));
     this.insertComment = options.insertComment || (params => this.defaultInsertComment(params));
-    this.getChannelId = options.getChannelId || (() => this.defaultGetChannelId());
-    this.channelId = null;
+    // Optional injectable/legacy owner-id resolver, used when a data-channel
+    // has no youtube_channel_id on file yet (or none is known at all).
+    this.getChannelId = options.getChannelId || null;
+    this.ownerChannelIds = new Map();
   }
 
-  async defaultListCommentThreads({ videoId, pageToken }) {
-    const youtube = this.credentials.getYouTubeClient();
+  async getYouTubeClient(channelId) {
+    let legacyClient = null;
+    if (!channelId) {
+      try { legacyClient = this.credentials.getYouTubeClient(); } catch (_error) { legacyClient = null; }
+    }
+    return getYouTubeClientForChannel(this.db, this.credentials, channelId, legacyClient);
+  }
+
+  async defaultListCommentThreads({ videoId, pageToken, channelId }) {
+    const youtube = await this.getYouTubeClient(channelId);
     const response = await youtube.commentThreads.list({
       part: ['snippet', 'replies'],
       videoId,
@@ -36,8 +47,8 @@ class AudienceEngagementService {
     return response.data;
   }
 
-  async defaultInsertComment({ parentId, text }) {
-    const youtube = this.credentials.getYouTubeClient();
+  async defaultInsertComment({ parentId, text, channelId }) {
+    const youtube = await this.getYouTubeClient(channelId);
     const response = await youtube.comments.insert({
       part: ['snippet'],
       requestBody: { snippet: { parentId, textOriginal: text } }
@@ -45,21 +56,29 @@ class AudienceEngagementService {
     return { id: response.data?.id };
   }
 
-  async defaultGetChannelId() {
-    const youtube = this.credentials.getYouTubeClient();
-    const response = await youtube.channels.list({ part: ['id'], mine: true });
-    return response.data?.items?.[0]?.id || null;
-  }
-
-  async resolveChannelId() {
-    if (this.channelId) return this.channelId;
+  // Our own YouTube channel id for a data-channel, used only to flag owner
+  // replies in a comment thread. It's usually already stored on the channel
+  // row (populated via the channel-stats refresh), so no API call is
+  // needed; the injectable getChannelId() resolver is a fallback for when
+  // it isn't (or for the legacy single-channel setup with no data-channel).
+  async resolveChannelId(channelId) {
+    const cacheKey = channelId || '__legacy__';
+    if (this.ownerChannelIds.has(cacheKey)) return this.ownerChannelIds.get(cacheKey);
+    let ownerId = null;
     try {
-      this.channelId = await this.getChannelId();
+      if (channelId) {
+        const channel = await this.db.getChannelById(channelId);
+        ownerId = channel?.youtube_channel_id || channel?.youtubeChannelId || null;
+      }
+      if (!ownerId && this.getChannelId) {
+        ownerId = await this.getChannelId();
+      }
     } catch (error) {
       this.logger.warn(`Channel id lookup failed; owner detection disabled: ${error.message}`);
-      this.channelId = null;
+      ownerId = null;
     }
-    return this.channelId;
+    this.ownerChannelIds.set(cacheKey, ownerId);
+    return ownerId;
   }
 
   permalink(videoId, commentId) {
@@ -121,7 +140,8 @@ class AudienceEngagementService {
   async syncVideoComments(videoId, meta = {}) {
     const existing = await this.db.getEngagementInsight(videoId);
     const watermark = existing?.newestCommentAt ? new Date(existing.newestCommentAt) : null;
-    const channelId = await this.resolveChannelId();
+    const channelId = meta.channelId || await this.db.getChannelIdForVideo(videoId);
+    const ownerChannelId = await this.resolveChannelId(channelId);
     let pageToken;
     let fetched = 0;
     let newest = watermark;
@@ -130,9 +150,9 @@ class AudienceEngagementService {
 
     try {
       do {
-        const page = await this.listCommentThreads({ videoId, pageToken });
+        const page = await this.listCommentThreads({ videoId, pageToken, channelId });
         for (const item of page.items || []) {
-          const threadComments = this.mapThread(item, videoId, channelId);
+          const threadComments = this.mapThread(item, videoId, ownerChannelId);
           const topPublished = threadComments[0]?.publishedAt ? new Date(threadComments[0].publishedAt) : null;
           if (watermark && topPublished && topPublished <= watermark) {
             reachedWatermark = true;
@@ -234,6 +254,7 @@ Comments: ${JSON.stringify(payload)}`;
   }
 
   async analyzeVideo(videoId) {
+    const channelId = await this.db.getChannelIdForVideo(videoId);
     // Top-level comments claim the analysis budget first; replies fill any remaining room.
     const selected = await this.db.listAudienceComments({ videoId, topLevelOnly: true, limit: this.maxCommentsPerAnalysis });
     if (selected.length < this.maxCommentsPerAnalysis) {
@@ -251,7 +272,7 @@ Comments: ${JSON.stringify(payload)}`;
     let method = 'ai';
     if (this.aiTextService?.isAvailable?.()) {
       try {
-        const language = await getContentLanguage(this.db);
+        const language = await getContentLanguage(this.db, channelId);
         const response = await this.aiTextService.generateText(
           this.buildAnalysisPrompt(comments, language),
           { maxTokens: 3000, temperature: 0.2 }
@@ -294,7 +315,7 @@ Comments: ${JSON.stringify(payload)}`;
       analysisMethod: method,
       analyzedAt: new Date().toISOString()
     });
-    if (method === 'ai') await this.refreshAudienceRecommendations(videoId, insight);
+    if (method === 'ai') await this.refreshAudienceRecommendations(videoId, insight, channelId);
     return insight;
   }
 
@@ -314,7 +335,7 @@ Comments: ${JSON.stringify(payload)}`;
     return 'low';
   }
 
-  async refreshAudienceRecommendations(videoId, insight) {
+  async refreshAudienceRecommendations(videoId, insight, channelId = null) {
     if (insight?.analysisMethod !== 'ai') return [];
     const saved = [];
     for (const theme of insight.themes || []) {
@@ -334,6 +355,7 @@ Comments: ${JSON.stringify(payload)}`;
       }
       saved.push(await this.db.saveLearningRecommendation({
         fingerprint: this.audienceFingerprint(videoId, topic),
+        channelId,
         category: 'audience_demand',
         title: `Audience request: ${theme.title}`,
         rationale: `${theme.count} commenters on "${insight.title || videoId}" raised this: ${theme.summary}`,
@@ -435,7 +457,8 @@ Comments: ${JSON.stringify(payload)}`;
       error.status = 409;
       throw error;
     }
-    const profile = await this.db.getChannelProfile();
+    const channelId = await this.db.getChannelIdForVideo(videoId);
+    const profile = channelId ? sanitizeChannel(await this.db.getChannelById(channelId)) : await this.db.getChannelProfile();
     const response = await this.aiTextService.generateText(
       this.buildDraftPrompt(targets, profile, insight.title),
       { maxTokens: 2500, temperature: 0.6 }
@@ -462,7 +485,13 @@ Comments: ${JSON.stringify(payload)}`;
     return drafts;
   }
 
-  postingEnabled() {
+  async postingEnabled(channelId = null) {
+    if (channelId) {
+      const channel = await this.db.getChannelById(channelId).catch(() => null);
+      if (!channel?.youtubeTokens?.refresh_token) return { enabled: false, reason: 'credentials_unavailable' };
+      if (!channelHasYouTubeScope(channel, FORCE_SSL_SCOPE)) return { enabled: false, reason: 'missing_scope' };
+      return { enabled: true, reason: null };
+    }
     if (!this.credentials?.hasYouTubeScope) return { enabled: false, reason: 'credentials_unavailable' };
     if (!this.credentials.hasYouTubeScope(FORCE_SSL_SCOPE)) return { enabled: false, reason: 'missing_scope' };
     return { enabled: true, reason: null };
@@ -520,7 +549,8 @@ Comments: ${JSON.stringify(payload)}`;
       error.status = 409;
       throw error;
     }
-    const posting = this.postingEnabled();
+    const channelId = await this.db.getChannelIdForVideo(draft.videoId);
+    const posting = await this.postingEnabled(channelId);
     if (!posting.enabled) {
       const error = new Error('Posting requires re-authorizing YouTube with the comment permission. Run npm run walkthrough to re-connect.');
       error.status = 409;
@@ -528,7 +558,7 @@ Comments: ${JSON.stringify(payload)}`;
       throw error;
     }
     const since = new Date(Date.now() - 86400000).toISOString();
-    if (await this.db.countReplyDraftsPostedSince(since) >= this.dailyReplyCap) {
+    if (await this.db.countReplyDraftsPostedSince(since, channelId) >= this.dailyReplyCap) {
       const error = new Error(`The daily reply cap (${this.dailyReplyCap}) was reached; try again tomorrow or raise ENGAGEMENT_DAILY_REPLY_CAP`);
       error.status = 429;
       throw error;
@@ -538,7 +568,7 @@ Comments: ${JSON.stringify(payload)}`;
     }
     const text = (draft.editedText || draft.draftText || '').trim();
     try {
-      const posted = await this.insertComment({ parentId: draft.commentId, text });
+      const posted = await this.insertComment({ parentId: draft.commentId, text, channelId });
       if (!posted?.id) throw new Error('YouTube did not return a comment id for the posted reply');
       await this.db.markAudienceCommentReplied(draft.commentId);
       return await this.db.updateReplyDraft(draftId, {
@@ -558,15 +588,15 @@ Comments: ${JSON.stringify(payload)}`;
     }
   }
 
-  async getSummary() {
+  async getSummary(channelId = null) {
     const [insights, pendingDrafts, pendingRecommendations] = await Promise.all([
-      this.db.listEngagementInsights({ limit: 12 }),
-      this.db.listReplyDrafts({ status: 'proposed', limit: 100 }),
-      this.db.listLearningRecommendations({ status: 'pending', limit: 100 })
+      this.db.listEngagementInsights({ limit: 12, channelId }),
+      this.db.listReplyDrafts({ status: 'proposed', limit: 100, channelId }),
+      this.db.listLearningRecommendations({ status: 'pending', limit: 100, channelId })
     ]);
     const since = new Date(Date.now() - 86400000).toISOString();
-    const postedToday = await this.db.countReplyDraftsPostedSince(since);
-    const posting = this.postingEnabled();
+    const postedToday = await this.db.countReplyDraftsPostedSince(since, channelId);
+    const posting = await this.postingEnabled(channelId);
     return {
       videosTracked: insights.length,
       pendingDrafts: pendingDrafts.length,

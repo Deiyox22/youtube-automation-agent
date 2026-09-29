@@ -278,15 +278,17 @@ class GrowthExperimentService {
     return { running: running.length, refreshed, failed };
   }
 
-  async getSummary() {
-    const experiments = await this.db.listGrowthExperiments({ limit: 25 });
+  async getSummary(channelId = null) {
+    const experiments = await this.db.listGrowthExperiments({ limit: 25, channelId });
     const rows = await this.db.getAllRows(
       `SELECT p.id AS production_id, ps.title, ps.youtube_id, cr.editor_data
        FROM publish_schedule ps
        JOIN productions p ON p.id = ps.production_id
        JOIN content_reviews cr ON cr.production_id = p.id
        WHERE ps.status = 'published' AND ps.youtube_id IS NOT NULL
-       ORDER BY ps.published_at DESC LIMIT 50`
+       ${channelId ? 'AND ps.channel_id = ?' : ''}
+       ORDER BY ps.published_at DESC LIMIT 50`,
+      channelId ? [channelId] : []
     );
     const activeProductionIds = new Set(experiments.filter(item => ACTIVE_STATUSES.has(item.status)).map(item => item.productionId));
     const candidates = (await Promise.all(rows.map(async row => {

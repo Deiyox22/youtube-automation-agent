@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const { Logger } = require('../utils/logger');
 const { ChannelLearningEngine } = require('../utils/channel-learning-engine');
+const { getYouTubeClientForChannel, getYouTubeAnalyticsClientForChannel } = require('../utils/youtube-client');
 
 class AnalyticsOptimizationAgent {
   constructor(db, credentials) {
@@ -20,16 +21,26 @@ class AnalyticsOptimizationAgent {
     return true;
   }
 
+  // Legacy single-channel fallback clients, used only when no channelId is
+  // given (pre-multi-channel callers). Not fatal if missing — channels each
+  // carry their own OAuth tokens now.
   async setupAnalyticsAPI() {
     try {
       const auth = this.credentials.getYouTubeAuth();
       this.youtubeAnalytics = google.youtubeAnalytics({ version: 'v2', auth });
       this.youtube = google.youtube({ version: 'v3', auth });
-      this.logger.info('YouTube Analytics API initialized');
+      this.logger.info('YouTube Analytics API initialized (legacy single-channel fallback)');
     } catch (error) {
-      this.logger.error('Failed to initialize Analytics API:', error);
-      throw error;
+      this.logger.warn(`No legacy YouTube connection available (${error.message}); per-channel analytics will still work`);
     }
+  }
+
+  async getClientsForChannel(channelId) {
+    const [youtube, youtubeAnalytics] = await Promise.all([
+      getYouTubeClientForChannel(this.db, this.credentials, channelId, this.youtube),
+      getYouTubeAnalyticsClientForChannel(this.db, this.credentials, channelId, this.youtubeAnalytics)
+    ]);
+    return { youtube, youtubeAnalytics };
   }
 
   async loadHistoricalData() {
@@ -39,6 +50,7 @@ class AnalyticsOptimizationAgent {
         const normalized = {
           ...record,
           videoId: record.videoId || record.video_id,
+          channelId: record.channelId || record.channel_id || null,
           analyzedAt: record.analyzedAt || record.analyzed_at,
           performance: record.performance || {
             score: record.performance_score || 0,
@@ -56,37 +68,41 @@ class AnalyticsOptimizationAgent {
   async analyzeVideoPerformance(videoId, options = {}) {
     try {
       this.logger.info(`Analyzing performance for video: ${videoId}`);
-      
+
+      const channelId = options.channelId || await this.db.getChannelIdForVideo(videoId);
+      const { youtube, youtubeAnalytics } = await this.getClientsForChannel(channelId);
+
       // Get video details
-      const videoDetails = await this.getVideoDetails(videoId);
-      
+      const videoDetails = await this.getVideoDetails(videoId, youtube);
+
       const measurementWindow = options.measurementWindow || 'rolling';
       const period = this.learning.measurementPeriod(videoDetails.publishedAt, measurementWindow);
 
       // Get analytics data
-      const channelStrategy = this.db.getChannelStrategy ? await this.db.getChannelStrategy() : null;
+      const channelStrategy = this.db.getChannelStrategy ? await this.db.getChannelStrategy(channelId) : null;
       const analytics = await this.getVideoAnalytics(videoId, period, {
         currency: channelStrategy?.outcome_currency || 'USD'
-      });
+      }, youtube, youtubeAnalytics);
       const context = await this.db.getPublishedContentContext(videoId);
 
       // Fetch the granular retention curve separately so its absence never
       // converts otherwise-real channel analytics into simulated data.
       const retention = analytics.simulated
         ? { available: false, simulated: true, reason: 'base_analytics_unavailable', points: [] }
-        : await this.getAudienceRetention(videoId, period, videoDetails.duration);
-      
+        : await this.getAudienceRetention(videoId, period, videoDetails.duration, youtubeAnalytics);
+
       // Analyze thumbnail performance
-      const thumbnailMetrics = await this.analyzeThumbnailPerformance(videoId, period);
-      
+      const thumbnailMetrics = await this.analyzeThumbnailPerformance(videoId, period, youtubeAnalytics);
+
       // Analyze title and SEO performance
       const seoMetrics = await this.analyzeSEOPerformance(videoDetails, analytics);
-      
+
       // Generate insights and recommendations
       const insights = await this.generateInsights(videoDetails, analytics, thumbnailMetrics, seoMetrics);
-      
+
       const performanceReport = {
         videoId,
+        channelId,
         videoDetails,
         analytics,
         retention,
@@ -97,15 +113,15 @@ class AnalyticsOptimizationAgent {
         measurementWindow,
         analyzedAt: new Date().toISOString()
       };
-      
+
       // Store in performance data
       this.performanceData.set(videoId, performanceReport);
-      
+
       // Save to database
       await this.db.saveAnalyticsReport(performanceReport);
       performanceReport.learningSnapshot = await this.learning.capture(
         performanceReport,
-        context,
+        { ...context, channelId },
         measurementWindow
       );
       if (retention.available) {
@@ -133,8 +149,8 @@ class AnalyticsOptimizationAgent {
     }
   }
 
-  async getVideoDetails(videoId) {
-    const response = await this.youtube.videos.list({
+  async getVideoDetails(videoId, youtube = this.youtube) {
+    const response = await youtube.videos.list({
       part: 'snippet,statistics,contentDetails',
       id: videoId
     });
@@ -159,10 +175,10 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async getVideoAnalytics(videoId, period = null, options = {}) {
+  async getVideoAnalytics(videoId, period = null, options = {}, youtube = this.youtube, youtubeAnalytics = this.youtubeAnalytics) {
     const endDate = period?.endDate || new Date().toISOString().split('T')[0];
     const startDate = period?.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    
+
     try {
       // Get various analytics metrics
       const [
@@ -173,14 +189,14 @@ class AnalyticsOptimizationAgent {
         deviceData,
         outcomeData
       ] = await Promise.all([
-        this.getViewsAnalytics(videoId, startDate, endDate),
-        this.getWatchTimeAnalytics(videoId, startDate, endDate),
-        this.getDemographicsAnalytics(videoId, startDate, endDate),
-        this.getTrafficSourcesAnalytics(videoId, startDate, endDate),
-        this.getDeviceAnalytics(videoId, startDate, endDate),
-        this.getOutcomeAnalytics(videoId, startDate, endDate, options.currency || 'USD')
+        this.getViewsAnalytics(videoId, startDate, endDate, youtubeAnalytics),
+        this.getWatchTimeAnalytics(videoId, startDate, endDate, youtubeAnalytics),
+        this.getDemographicsAnalytics(videoId, startDate, endDate, youtubeAnalytics),
+        this.getTrafficSourcesAnalytics(videoId, startDate, endDate, youtubeAnalytics),
+        this.getDeviceAnalytics(videoId, startDate, endDate, youtubeAnalytics),
+        this.getOutcomeAnalytics(videoId, startDate, endDate, options.currency || 'USD', youtubeAnalytics)
       ]);
-      
+
       return {
         simulated: false,
         period: { startDate, endDate },
@@ -190,7 +206,7 @@ class AnalyticsOptimizationAgent {
         trafficSources: trafficSourcesData,
         devices: deviceData,
         outcomes: outcomeData,
-        engagement: await this.calculateEngagementMetrics(videoId)
+        engagement: await this.calculateEngagementMetrics(videoId, youtube)
       };
     } catch (error) {
       this.logger.error(`Failed to get analytics for ${videoId}:`, error);
@@ -198,8 +214,8 @@ class AnalyticsOptimizationAgent {
     }
   }
 
-  async getViewsAnalytics(videoId, startDate, endDate) {
-    const response = await this.youtubeAnalytics.reports.query({
+  async getViewsAnalytics(videoId, startDate, endDate, youtubeAnalytics = this.youtubeAnalytics) {
+    const response = await youtubeAnalytics.reports.query({
       ids: 'channel==MINE',
       startDate,
       endDate,
@@ -216,8 +232,8 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async getWatchTimeAnalytics(videoId, startDate, endDate) {
-    const response = await this.youtubeAnalytics.reports.query({
+  async getWatchTimeAnalytics(videoId, startDate, endDate, youtubeAnalytics = this.youtubeAnalytics) {
+    const response = await youtubeAnalytics.reports.query({
       ids: 'channel==MINE',
       startDate,
       endDate,
@@ -235,10 +251,10 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async getDemographicsAnalytics(videoId, startDate, endDate) {
+  async getDemographicsAnalytics(videoId, startDate, endDate, youtubeAnalytics = this.youtubeAnalytics) {
     try {
       const [ageResponse, genderResponse] = await Promise.all([
-        this.youtubeAnalytics.reports.query({
+        youtubeAnalytics.reports.query({
           ids: 'channel==MINE',
           startDate,
           endDate,
@@ -246,7 +262,7 @@ class AnalyticsOptimizationAgent {
           dimensions: 'ageGroup',
           filters: `video==${videoId}`
         }),
-        this.youtubeAnalytics.reports.query({
+        youtubeAnalytics.reports.query({
           ids: 'channel==MINE',
           startDate,
           endDate,
@@ -266,8 +282,8 @@ class AnalyticsOptimizationAgent {
     }
   }
 
-  async getTrafficSourcesAnalytics(videoId, startDate, endDate) {
-    const response = await this.youtubeAnalytics.reports.query({
+  async getTrafficSourcesAnalytics(videoId, startDate, endDate, youtubeAnalytics = this.youtubeAnalytics) {
+    const response = await youtubeAnalytics.reports.query({
       ids: 'channel==MINE',
       startDate,
       endDate,
@@ -290,8 +306,8 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async getDeviceAnalytics(videoId, startDate, endDate) {
-    const response = await this.youtubeAnalytics.reports.query({
+  async getDeviceAnalytics(videoId, startDate, endDate, youtubeAnalytics = this.youtubeAnalytics) {
+    const response = await youtubeAnalytics.reports.query({
       ids: 'channel==MINE',
       startDate,
       endDate,
@@ -313,8 +329,8 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async getOutcomeAnalytics(videoId, startDate, endDate, currency = 'USD') {
-    const query = (metrics, includeCurrency = false) => this.youtubeAnalytics.reports.query({
+  async getOutcomeAnalytics(videoId, startDate, endDate, currency = 'USD', youtubeAnalytics = this.youtubeAnalytics) {
+    const query = (metrics, includeCurrency = false) => youtubeAnalytics.reports.query({
       ids: 'channel==MINE',
       startDate,
       endDate,
@@ -347,8 +363,8 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async calculateEngagementMetrics(videoId) {
-    const videoDetails = await this.getVideoDetails(videoId);
+  async calculateEngagementMetrics(videoId, youtube = this.youtube) {
+    const videoDetails = await this.getVideoDetails(videoId, youtube);
     const stats = videoDetails.statistics;
     
     const views = stats.viewCount || 0;
@@ -367,10 +383,10 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async analyzeThumbnailPerformance(videoId, period = null) {
+  async analyzeThumbnailPerformance(videoId, period = null, youtubeAnalytics = this.youtubeAnalytics) {
     // Analyze thumbnail click-through rate and impressions
     try {
-      const response = await this.youtubeAnalytics.reports.query({
+      const response = await youtubeAnalytics.reports.query({
         ids: 'channel==MINE',
         startDate: period?.startDate || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
         endDate: period?.endDate || new Date().toISOString().split('T')[0],
@@ -752,9 +768,10 @@ class AnalyticsOptimizationAgent {
     return total > 0 ? ((mobile / total) * 100).toFixed(1) : '0';
   }
 
-  async getRecentAnalytics(days = 7) {
+  async getRecentAnalytics(days = 7, channelId = null) {
     const recentReports = Array.from(this.performanceData.values())
       .filter(report => {
+        if (channelId && report.channelId !== channelId) return false;
         const reportDate = new Date(report.analyzedAt);
         const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
         return reportDate > cutoffDate;
@@ -769,11 +786,11 @@ class AnalyticsOptimizationAgent {
     };
   }
 
-  async getAudienceRetention(videoId, period = null, isoDuration = null) {
+  async getAudienceRetention(videoId, period = null, isoDuration = null, youtubeAnalytics = this.youtubeAnalytics) {
     const endDate = period?.endDate || new Date().toISOString().split('T')[0];
     const startDate = period?.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     try {
-      const response = await this.youtubeAnalytics.reports.query({
+      const response = await youtubeAnalytics.reports.query({
         ids: 'channel==MINE',
         startDate,
         endDate,
@@ -815,8 +832,8 @@ class AnalyticsOptimizationAgent {
     return Number(match[1] || 0) * 86400 + Number(match[2] || 0) * 3600 + Number(match[3] || 0) * 60 + Number(match[4] || 0);
   }
 
-  getLearningSummary() {
-    return this.learning.getSummary();
+  getLearningSummary(channelId = null) {
+    return this.learning.getSummary(channelId);
   }
 
   getDueMeasurementWindows(video) {

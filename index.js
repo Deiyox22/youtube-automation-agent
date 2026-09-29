@@ -30,6 +30,7 @@ const { GrowthExperimentService } = require('./utils/growth-experiment-service')
 const { AITextService } = require('./utils/ai-text-service');
 const { DiscoverabilityService } = require('./utils/discoverability-service');
 const { isSupportedLanguage } = require('./utils/content-language');
+const { sanitizeChannel: sanitizeChannelUtil } = require('./utils/youtube-client');
 const { version } = require('./package.json');
 const chalk = require('chalk');
 
@@ -738,10 +739,10 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
           this.db.getAllSettings(),
           this.db.listContentIdeas(channelId),
           this.agents.analytics
-            ? this.agents.analytics.getRecentAnalytics(30)
+            ? this.agents.analytics.getRecentAnalytics(30, channelId)
             : Promise.resolve({ totalVideos: 0, averagePerformanceScore: 0, topPerformers: [], insights: [] }),
           this.agents.analytics?.getLearningSummary
-            ? this.agents.analytics.getLearningSummary()
+            ? this.agents.analytics.getLearningSummary(channelId)
             : Promise.resolve({ measuredVideos: 0, snapshotCount: 0, baseline: {}, recommendations: [], approvedCount: 0, pendingCount: 0 }),
           this.activation
             ? this.activation.getSummary()
@@ -752,7 +753,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
             ? this.readiness.getSummary()
             : Promise.resolve({ status: 'unverified', stale: false, blockingFailures: [], checks: [] }),
           this.engagement
-            ? this.engagement.getSummary()
+            ? this.engagement.getSummary(channelId)
             : Promise.resolve({
                 videosTracked: 0, pendingDrafts: 0, postedToday: 0, needsAttentionCount: 0,
                 pendingAudienceIdeas: 0, postingEnabled: false, postingDisabledReason: 'setup_required',
@@ -760,7 +761,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
                 evidencePolicy: 'Comments are fetched read-only from YouTube. Replies post only after operator approval, and fallback analysis never proposes drafts or ideas.'
               }),
           this.experiments
-            ? this.experiments.getSummary()
+            ? this.experiments.getSummary(channelId)
             : Promise.resolve({ experiments: [], candidates: [], activeCount: 0, awaitingDecisionCount: 0, evidencePolicy: 'Finish setup to create a controlled growth experiment.' }),
           this.db.listChannels()
         ]);
@@ -871,6 +872,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       try {
         if (!this.readiness) return res.status(503).json({ error: 'Readiness service is not initialized' });
         const result = await this.readiness.run({
+          channelId: req.body?.channelId || null,
           includePaidMedia: req.body?.includePaidMedia === true,
           includePaidVideo: req.body?.includePaidVideo === true
         });
@@ -1988,9 +1990,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
   // Never send OAuth tokens to the browser — the connected/needs_auth
   // status is all the dashboard needs to know.
   sanitizeChannel(channel) {
-    if (!channel) return channel;
-    const { youtubeTokens, youtube_tokens: _youtubeTokensRaw, ...safe } = channel;
-    return { ...safe, youtubeConnected: Boolean(youtubeTokens?.refresh_token) };
+    return sanitizeChannelUtil(channel);
   }
 
   validateChannelInput(input) {

@@ -1831,6 +1831,7 @@ $('#run-readiness-button').addEventListener('click', async event => {
   button.textContent = 'Exécution des vérifications en direct…';
   try {
     await mutate('/api/readiness/run', 'POST', {
+      channelId: ui.activeChannelId,
       includePaidMedia: $('#paid-image-probe').checked,
       includePaidVideo: $('#paid-video-probe').checked
     }, 'Vérification de préparation de production terminée.');

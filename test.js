@@ -327,7 +327,7 @@ class SystemTest {
       const unavailableStart = await fetch(`http://127.0.0.1:${port}/api/operator/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}'
+        body: JSON.stringify({ channelId: 'channel_operator_test' })
       });
       if (unavailableStart.status !== 503) {
         throw new Error('Autonomous operator did not fail closed when its strategy agent was unavailable');
@@ -365,12 +365,12 @@ class SystemTest {
     const { AutonomousChannelOperator } = require('./utils/autonomous-channel-operator');
     const db = new Database();
     await db.initialize();
-    const previousStrategy = await db.getChannelStrategy();
+    const channel = await db.createChannel({ name: 'Autonomous operator test channel' });
     let run;
     let recoverableJob;
 
     try {
-      const strategy = await db.saveChannelStrategy({
+      const strategy = await db.saveChannelStrategy(channel.id, {
         objective: 'Teach small teams to automate useful work',
         audience: 'Small business operators',
         valueProposition: 'Practical steps without hype',
@@ -427,7 +427,7 @@ class SystemTest {
         }
       });
       run = await operator.start(strategy);
-      await operator.activeRuns.get(run.id);
+      await operator.activeRuns.get(run.id)?.work;
       const completed = await db.getOperatorRun(run.id);
       if (
         completed.status !== 'waiting_review' ||
@@ -452,7 +452,7 @@ class SystemTest {
         completedAt: new Date().toISOString()
       });
       await operator.resume(run.id, strategy);
-      await operator.activeRuns.get(run.id);
+      await operator.activeRuns.get(run.id)?.work;
       const recoveredRun = await db.getOperatorRun(run.id);
       if (resumedJobs !== 1 || recoveredRun.status !== 'waiting_review' || recoveredRun.generatedJobs[0].status !== 'completed') {
         throw new Error('Autonomous operator did not continue from its saved plan and interrupted job');
@@ -465,23 +465,8 @@ class SystemTest {
         }
         await db.executeQuery('DELETE FROM operator_runs WHERE id = ?', [run.id]);
       }
-      if (previousStrategy) {
-        await db.saveChannelStrategy({
-          objective: previousStrategy.objective,
-          audience: previousStrategy.audience,
-          valueProposition: previousStrategy.value_proposition,
-          contentPillars: previousStrategy.contentPillars,
-          cadencePerWeek: previousStrategy.cadence_per_week,
-          videosPerRun: previousStrategy.videos_per_run,
-          defaultFormat: previousStrategy.default_format,
-          defaultLength: previousStrategy.default_length,
-          successMetric: previousStrategy.success_metric,
-          constraints: previousStrategy.constraints,
-          status: previousStrategy.status
-        });
-      } else {
-        await db.executeQuery("DELETE FROM channel_strategies WHERE id = 'default'");
-      }
+      await db.executeQuery('DELETE FROM channel_strategies WHERE channel_id = ?', [channel.id]);
+      await db.executeQuery('DELETE FROM channels WHERE id = ?', [channel.id]);
       if (recoverableJob) await db.executeQuery('DELETE FROM generation_jobs WHERE id = ?', [recoverableJob.id]);
       await db.close();
     }
@@ -748,13 +733,14 @@ class SystemTest {
     await db.initialize();
 
     try {
+      const channel = await db.createChannel({ name: 'Outcome ROI test channel' });
       const validated = new YouTubeAutomationAgent().validateChannelStrategy({
         objective: 'Grow a durable automation audience', audience: 'Small teams',
         contentPillars: ['Automation', 'Tool reviews'], primaryKpi: 'subscribers',
         targetValue: 40, targetWindowDays: 28, monthlyBudget: 100,
         outcomeCurrency: 'USD', status: 'active'
       });
-      const strategy = await db.saveChannelStrategy(validated);
+      const strategy = await db.saveChannelStrategy(channel.id, validated);
       if (strategy.primary_kpi !== 'subscribers' || strategy.target_value !== 40 || strategy.target_window_days !== 28) {
         throw new Error('Structured outcome strategy was not validated and persisted');
       }
@@ -778,6 +764,7 @@ class SystemTest {
         performance: { score: 70, grade: 'B' }
       });
       const context = (format, pillar) => ({
+        channelId: channel.id,
         strategy: { topic: `${format} topic`, contentType: format, requestedLengthKey: 'medium', contentPillar: pillar },
         script: { hook: 'A concise, outcome-aligned opening.' },
         thumbnail: { concept: { composition: 'centered' } },
@@ -788,7 +775,7 @@ class SystemTest {
       await learning.capture(report('outcome-list-1', 'list', 2, 5), context('list', 'Tool reviews'), '7d');
       await learning.capture(report('outcome-list-2', 'list', 1, 5), context('list', 'Tool reviews'), '7d');
 
-      const summary = await learning.getSummary();
+      const summary = await learning.getSummary(channel.id);
       const recommendation = summary.recommendations.find(item => item.category === 'outcome_alignment');
       if (
         summary.outcome.goal.id !== 'subscribers' || summary.outcome.observed !== 25 ||
@@ -1105,7 +1092,7 @@ class SystemTest {
       if (routed.select('auto', ['seedance', 'wan'], { duration: 8, generateAudio: true }).id !== 'slideshow') {
         throw new Error('Automatic video routing selected a provider without requested native audio support');
       }
-      const listedJob = (await db.listGenerationJobs(10)).find(item => item.id === job.id);
+      const listedJob = (await db.listGenerationJobs(null, 10)).find(item => item.id === job.id);
       if (listedJob?.mediaTasks?.length !== 1 || listedJob.mediaTasks[0].external_task_id !== 'prediction-1') {
         throw new Error('Generation job history did not expose its durable provider task');
       }
@@ -2109,22 +2096,30 @@ class SystemTest {
       throw new Error('requireAPIKey is not implemented');
     }
 
+    const channelId = 'channel_test_validation';
+
+    const missingChannel = agent.validateGenerateRequestBody({ topic: 'Node automation', style: 'tutorial' });
+    if (missingChannel.valid || missingChannel.status !== 400) {
+      throw new Error('A generate request without a channelId was not rejected');
+    }
+
     const valid = agent.validateGenerateRequestBody({
+      channelId,
       topic: 'Node automation',
       style: 'tutorial'
     });
-    if (!valid.valid || valid.value.topic !== 'Node automation') {
+    if (!valid.valid || valid.value.topic !== 'Node automation' || valid.value.channelId !== channelId) {
       throw new Error('Valid generate request was rejected');
     }
 
-    const invalidTopic = agent.validateGenerateRequestBody({ topic: 123 });
+    const invalidTopic = agent.validateGenerateRequestBody({ channelId, topic: 123 });
     if (invalidTopic.valid || invalidTopic.status !== 400) {
       throw new Error('Non-string topic was not rejected');
     }
 
     // The dashboard's "Generate Content Now" button sends an explicit null topic
     // to mean "pick a trending topic for me". null must be accepted, not rejected.
-    const dashboardPayload = agent.validateGenerateRequestBody({ topic: null, style: 'story' });
+    const dashboardPayload = agent.validateGenerateRequestBody({ channelId, topic: null, style: 'story' });
     if (!dashboardPayload.valid) {
       throw new Error(`Dashboard generate payload was rejected: ${dashboardPayload.error}`);
     }
@@ -2132,22 +2127,22 @@ class SystemTest {
       throw new Error('Null topic was not normalised to an auto-selected topic');
     }
 
-    const nullStyle = agent.validateGenerateRequestBody({ topic: 'Node automation', style: null });
+    const nullStyle = agent.validateGenerateRequestBody({ channelId, topic: 'Node automation', style: null });
     if (!nullStyle.valid || nullStyle.value.style !== null) {
       throw new Error('Null style was not accepted as "no style preference"');
     }
 
-    const nullLength = agent.validateGenerateRequestBody({ topic: null, style: null, length: null });
+    const nullLength = agent.validateGenerateRequestBody({ channelId, topic: null, style: null, length: null });
     if (!nullLength.valid || nullLength.value.length !== 'medium') {
       throw new Error('Null length did not fall back to the default length');
     }
 
-    const blankTopic = agent.validateGenerateRequestBody({ topic: '   ' });
+    const blankTopic = agent.validateGenerateRequestBody({ channelId, topic: '   ' });
     if (!blankTopic.valid || blankTopic.value.topic !== null) {
       throw new Error('Whitespace-only topic was not normalised to null');
     }
 
-    const invalidStyle = agent.validateGenerateRequestBody({ style: 'x'.repeat(51) });
+    const invalidStyle = agent.validateGenerateRequestBody({ channelId, style: 'x'.repeat(51) });
     if (invalidStyle.valid || invalidStyle.status !== 400) {
       throw new Error('Overlong style was not rejected');
     }
@@ -3330,7 +3325,7 @@ class SystemTest {
       code = null;
       try { await unscoped.approveReplyDraft(draft.id, { confirmed: true }); } catch (error) { code = error.code; }
       if (code !== 'REPLY_SCOPE_REQUIRED') throw new Error('Missing force-ssl scope must block posting');
-      const gate = unscoped.postingEnabled();
+      const gate = await unscoped.postingEnabled();
       if (gate.enabled || gate.reason !== 'missing_scope') {
         throw new Error('postingEnabled must report missing_scope');
       }

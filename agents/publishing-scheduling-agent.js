@@ -4,6 +4,7 @@ const fsSync = require('fs');
 const path = require('path');
 const { Logger } = require('../utils/logger');
 const { assertValidYouTubeMetadata } = require('../utils/youtube-metadata-validator');
+const { getYouTubeClientForChannel } = require('../utils/youtube-client');
 
 class PublishingSchedulingAgent {
   constructor(db, credentials) {
@@ -39,22 +40,7 @@ class PublishingSchedulingAgent {
   // built against the shared OAuth client (YOUTUBE_CLIENT_ID/SECRET) — one
   // Google Cloud OAuth client can mint tokens for any number of channels.
   async getYouTubeClientForChannel(channelId) {
-    if (!channelId) {
-      if (!this.youtube) throw new Error('No YouTube connection is configured for this content (no channel and no legacy fallback)');
-      return this.youtube;
-    }
-    const channel = await this.db.getChannelById(channelId);
-    if (!channel) throw new Error(`Channel ${channelId} not found`);
-    if (!channel.youtubeTokens?.refresh_token) {
-      const error = new Error(`Channel "${channel.name}" is not connected to YouTube`);
-      error.status = 409;
-      throw error;
-    }
-    const config = this.credentials.getYouTubeOAuthConfig();
-    if (!config) throw new Error('YouTube OAuth is not configured (YOUTUBE_CLIENT_ID/SECRET/REDIRECT_URI)');
-    const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
-    oauth2Client.setCredentials(channel.youtubeTokens);
-    return google.youtube({ version: 'v3', auth: oauth2Client });
+    return getYouTubeClientForChannel(this.db, this.credentials, channelId, this.youtube);
   }
 
   async loadPublishQueue() {

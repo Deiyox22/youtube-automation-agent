@@ -50,7 +50,7 @@ class ActivationMetrics {
   async getSummary() {
     const [setupCompletedAt, jobs, productions, approvedRows, publishedRows] = await Promise.all([
       this.db.getSetting('setup_completed_at'),
-      this.db.listGenerationJobs(1000),
+      this.db.listGenerationJobs(null, 1000),
       this.db.getProductionPipeline(),
       this.db.getAllRows(
         "SELECT production_id, reviewed_at, created_at FROM content_reviews WHERE status = 'approved' ORDER BY COALESCE(reviewed_at, created_at) ASC"
