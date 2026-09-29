@@ -28,6 +28,31 @@
   ensureMiniLabels();
   setInterval(ensureMiniLabels, 4000);
 
+  /* ---------- Mobile navigation drawer ---------- */
+  const mobileNavToggle = $('#mobile-nav-toggle');
+  const mobileNavBackdrop = $('#mobile-nav-backdrop');
+  function closeMobileNav() {
+    document.body.classList.remove('mobile-nav-open');
+    if (mobileNavToggle) mobileNavToggle.setAttribute('aria-expanded', 'false');
+  }
+  function openMobileNav() {
+    document.body.classList.add('mobile-nav-open');
+    if (mobileNavToggle) mobileNavToggle.setAttribute('aria-expanded', 'true');
+  }
+  if (mobileNavToggle) {
+    mobileNavToggle.addEventListener('click', () => {
+      document.body.classList.contains('mobile-nav-open') ? closeMobileNav() : openMobileNav();
+    });
+    mobileNavBackdrop?.addEventListener('click', closeMobileNav);
+    $$('.nav-item').forEach(item => item.addEventListener('click', closeMobileNav));
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && document.body.classList.contains('mobile-nav-open')) closeMobileNav();
+    });
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 900) closeMobileNav();
+    }, { passive: true });
+  }
+
   /* ---------- 1. View choreography ---------- */
   const VIEW_META = {
     overview: ['VUE D’ENSEMBLE OPÉRATEUR', 'Sachez ce qui va se passer.', 'Vue d’ensemble'],
