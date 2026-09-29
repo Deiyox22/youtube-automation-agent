@@ -12,8 +12,8 @@
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   const MINI_LABELS = {
-    overview: 'Home', operator: 'Operator', pipeline: 'Pipeline',
-    calendar: 'Calendar', analytics: 'Stats', readiness: 'Checks', settings: 'Setup'
+    overview: 'Accueil', operator: 'Opérateur', pipeline: 'Pipeline',
+    calendar: 'Calendrier', analytics: 'Stats', readiness: 'Vérifs', settings: 'Config'
   };
   function ensureMiniLabels() {
     $$('.nav-item').forEach(item => {
@@ -30,13 +30,13 @@
 
   /* ---------- 1. View choreography ---------- */
   const VIEW_META = {
-    overview: ['OPERATOR OVERVIEW', 'Know what happens next.', 'Overview'],
-    operator: ['AUTONOMOUS OPERATOR', 'Give Lumen the strategy.', 'Operator'],
-    pipeline: ['CONTENT OPERATIONS', 'From idea to published.', 'Pipeline'],
-    calendar: ['EDITORIAL PLANNING', 'Plan before you generate.', 'Calendar'],
-    analytics: ['PERFORMANCE', 'Turn results into the next move.', 'Analytics'],
-    readiness: ['PRODUCTION READINESS', 'Verify before autonomy runs.', 'Readiness'],
-    settings: ['CHANNEL GUARDRAILS', 'Make every agent sound like you.', 'Setup']
+    overview: ['VUE D’ENSEMBLE OPÉRATEUR', 'Sachez ce qui va se passer.', 'Vue d’ensemble'],
+    operator: ['OPÉRATEUR AUTONOME', 'Donnez la stratégie à Lumen.', 'Opérateur'],
+    pipeline: ['OPÉRATIONS DE CONTENU', 'De l’idée à la publication.', 'Pipeline'],
+    calendar: ['PLANIFICATION ÉDITORIALE', 'Planifiez avant de générer.', 'Calendrier'],
+    analytics: ['PERFORMANCE', 'Transformez les résultats en prochaine étape.', 'Statistiques'],
+    readiness: ['PRÉPARATION À LA PRODUCTION', 'Vérifiez avant que l’autonomie ne s’exécute.', 'Préparation'],
+    settings: ['GARDE-FOUS DE LA CHAÎNE', 'Faites en sorte que chaque agent vous ressemble.', 'Configuration']
   };
   let currentView = 'overview';
   const baseSwitchView = window.switchView;
@@ -81,7 +81,7 @@
     const start = performance.now();
     function frame(now) {
       const t = Math.min(1, (now - start) / dur);
-      el.textContent = `${Math.round(target * easeOut(t)).toLocaleString()}${suffix}`;
+      el.textContent = `${Math.round(target * easeOut(t)).toLocaleString('fr-FR')}${suffix}`;
       if (t < 1) requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
@@ -109,14 +109,14 @@
   const palette = document.createElement('div');
   palette.className = 'cmdk-backdrop hidden';
   palette.innerHTML = `
-    <div class="cmdk" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="cmdk" role="dialog" aria-modal="true" aria-label="Palette de commandes">
       <div class="cmdk-head">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-        <input class="cmdk-input" type="text" placeholder="Jump to a view, run a command…" aria-label="Command input" autocomplete="off" spellcheck="false">
-        <kbd>esc</kbd>
+        <input class="cmdk-input" type="text" placeholder="Aller à une vue, exécuter une commande…" aria-label="Champ de commande" autocomplete="off" spellcheck="false">
+        <kbd>échap</kbd>
       </div>
-      <div class="cmdk-list" role="listbox" aria-label="Commands"></div>
-      <div class="cmdk-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span class="cmdk-brand">Lumen console</span></div>
+      <div class="cmdk-list" role="listbox" aria-label="Commandes"></div>
+      <div class="cmdk-foot"><span><kbd>↑</kbd><kbd>↓</kbd> naviguer</span><span><kbd>↵</kbd> exécuter</span><span class="cmdk-brand">Console Lumen</span></div>
     </div>`;
   document.body.appendChild(palette);
   const listEl = palette.querySelector('.cmdk-list');
@@ -124,7 +124,7 @@
 
   function buildCommands() {
     const cmds = Object.entries(VIEW_META).map(([id, meta]) => ({
-      group: 'Navigate', icon: 'view', label: meta[2] === 'Setup' ? 'Channel setup' : meta[2],
+      group: 'Naviguer', icon: 'view', label: meta[2] === 'Configuration' ? 'Configuration de la chaîne' : meta[2],
       hint: meta[1], keywords: id, run: () => window.switchView(id)
     }));
     const action = (label, hint, selector, keywords) => ({
@@ -132,14 +132,14 @@
       run: () => { const el = $(selector); if (el) el.click(); }
     });
     cmds.push(
-      action('Create video', 'Queue a new generation job', '#generate-button', 'generate new video create'),
-      action('Add backlog idea', 'Save a topic for later', '#add-idea-button', 'idea backlog topic'),
-      action('Run verified readiness check', 'Prove the production path', '#run-readiness-button', 'readiness verify dry run check'),
+      action('Créer une vidéo', 'Mettre en file une nouvelle tâche de génération', '#generate-button', 'générer nouvelle vidéo créer'),
+      action('Ajouter une idée au backlog', 'Enregistrer un sujet pour plus tard', '#add-idea-button', 'idée backlog sujet'),
+      action('Lancer la vérification de préparation', 'Valider le chemin de production', '#run-readiness-button', 'préparation vérifier test lancer'),
       ui.state?.system?.automationPaused
-        ? action('Resume automation', 'Unpause the scheduler', '#automation-toggle', 'resume unpause automation play')
-        : action('Pause automation', 'Halt scheduled generation', '#automation-toggle', 'pause halt automation stop'),
-      action('Refresh dashboard data', 'Pull latest state now', '#refresh-button', 'refresh reload sync data'),
-      action('Set dashboard API key', 'Store access key in this browser', '#api-key-button', 'api key auth credentials')
+        ? action('Reprendre l’automatisation', 'Désactiver la pause du planificateur', '#automation-toggle', 'reprendre automatisation lecture')
+        : action('Mettre en pause l’automatisation', 'Arrêter la génération planifiée', '#automation-toggle', 'pause arrêt automatisation stop'),
+      action('Actualiser les données du tableau de bord', 'Récupérer l’état le plus récent', '#refresh-button', 'actualiser recharger synchroniser données'),
+      action('Définir la clé API du tableau de bord', 'Stocker la clé d’accès dans ce navigateur', '#api-key-button', 'clé api authentification identifiants')
     );
     return cmds;
   }
@@ -159,7 +159,7 @@
     filtered = q ? cmds.filter(c => `${c.label} ${c.hint} ${c.keywords}`.toLowerCase().includes(q)) : cmds;
     selected = Math.min(selected, Math.max(0, filtered.length - 1));
     if (!filtered.length) {
-      listEl.innerHTML = '<div class="cmdk-empty">No matching commands.</div>';
+      listEl.innerHTML = '<div class="cmdk-empty">Aucune commande correspondante.</div>';
       return;
     }
     let lastGroup = '';
@@ -245,8 +245,8 @@
   // Visible trigger in the topbar
   const trigger = document.createElement('button');
   trigger.className = 'kbd-trigger';
-  trigger.setAttribute('aria-label', 'Open command palette');
-  trigger.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>Search</span><kbd>Ctrl K</kbd>';
+  trigger.setAttribute('aria-label', 'Ouvrir la palette de commandes');
+  trigger.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>Rechercher</span><kbd>Ctrl K</kbd>';
   trigger.addEventListener('click', openPalette);
   $('.top-actions').prepend(trigger);
 
@@ -368,7 +368,7 @@
     footer.prepend(cluster);
     const clockLabel = cluster.querySelector('.console-clock span');
     const tickClock = () => {
-      clockLabel.textContent = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+      clockLabel.textContent = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
     };
     tickClock();
     setInterval(tickClock, 15000);
