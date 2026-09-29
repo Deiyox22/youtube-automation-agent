@@ -137,14 +137,15 @@ class CredentialManager {
   }
 
   getYouTubeAuth() {
-    if (!this.credentials.youtube || !this.tokens.youtube) {
+    const config = this.getYouTubeOAuthConfig();
+    if (!config || !this.tokens.youtube) {
       throw new Error('YouTube credentials not configured');
     }
 
     const oauth2Client = new google.auth.OAuth2(
-      this.credentials.youtube.client_id,
-      this.credentials.youtube.client_secret,
-      this.credentials.youtube.redirect_uris[0]
+      config.clientId,
+      config.clientSecret,
+      config.redirectUri
     );
 
     oauth2Client.setCredentials(this.tokens.youtube);
@@ -522,10 +523,32 @@ class CredentialManager {
     return envKeys.some(key => process.env[key]);
   }
 
+  // Resolves YouTube OAuth client config from credentials.json first, falling
+  // back to YOUTUBE_CLIENT_ID/YOUTUBE_CLIENT_SECRET/YOUTUBE_REDIRECT_URI env
+  // vars. This lets a hosted deployment (no interactive terminal) configure
+  // the OAuth client entirely through environment variables and finish the
+  // consent step at GET /auth/youtube/start on the running app's own URL.
+  getYouTubeOAuthConfig() {
+    const clientId = this.credentials.youtube?.client_id || process.env.YOUTUBE_CLIENT_ID;
+    const clientSecret = this.credentials.youtube?.client_secret || process.env.YOUTUBE_CLIENT_SECRET;
+    const redirectUri = process.env.YOUTUBE_REDIRECT_URI || this.credentials.youtube?.redirect_uris?.[0];
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      return null;
+    }
+
+    return { clientId, clientSecret, redirectUri };
+  }
+
+  async saveYouTubeTokens(tokens) {
+    this.tokens.youtube = tokens;
+    await this.saveTokens();
+  }
+
   getMissingCredentials() {
     const missing = [];
 
-    if (!this.credentials.youtube) {
+    if (!this.credentials.youtube && !this.getYouTubeOAuthConfig()) {
       missing.push('youtube');
     }
 

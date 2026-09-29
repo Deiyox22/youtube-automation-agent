@@ -4,6 +4,7 @@ const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs').promises;
+const { google } = require('googleapis');
 const { Logger } = require('./utils/logger');
 const { Database } = require('./database/db');
 const { CredentialManager } = require('./utils/credential-manager');
@@ -440,7 +441,64 @@ class YouTubeAutomationAgent {
     this.app.get('/', (req, res) => {
       res.sendFile(path.join(__dirname, 'dashboard', 'index.html'));
     });
-    
+
+    // Hosted YouTube OAuth (no local terminal required): configure
+    // YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REDIRECT_URI (a
+    // "Web application" OAuth client, redirect URI = <this app's public
+    // URL>/auth/youtube/callback), then visit /auth/youtube/start once.
+    this.app.get('/auth/youtube/start', (req, res) => {
+      const config = this.credentials?.getYouTubeOAuthConfig?.();
+      if (!config) {
+        return res.status(400).send(
+          'YouTube OAuth is not configured. Set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, ' +
+          'and YOUTUBE_REDIRECT_URI (pointing at this app\'s /auth/youtube/callback URL) first.'
+        );
+      }
+      const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
+      const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        prompt: 'consent',
+        scope: [
+          'https://www.googleapis.com/auth/youtube.upload',
+          'https://www.googleapis.com/auth/youtube',
+          'https://www.googleapis.com/auth/youtube.readonly',
+          'https://www.googleapis.com/auth/yt-analytics.readonly',
+          'https://www.googleapis.com/auth/youtube.force-ssl'
+        ]
+      });
+      return res.redirect(authUrl);
+    });
+
+    this.app.get('/auth/youtube/callback', async (req, res) => {
+      const { code, error } = req.query;
+      if (error) {
+        return res.status(400).send(`<h1>Authorization error</h1><p>${error}</p>`);
+      }
+      if (!code) {
+        return res.status(400).send('<h1>Missing authorization code</h1>');
+      }
+      const config = this.credentials?.getYouTubeOAuthConfig?.();
+      if (!config) {
+        return res.status(400).send('<h1>YouTube OAuth is not configured</h1>');
+      }
+      try {
+        const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
+        const { tokens } = await oauth2Client.getToken(code);
+        await this.credentials.saveYouTubeTokens(tokens);
+        res.send(`
+          <html><body style="font-family:Arial,sans-serif;text-align:center;padding:50px;">
+            <h1>✅ YouTube connected</h1>
+            <p>The app is restarting to apply this. Wait about 15&ndash;30 seconds, then refresh the dashboard.</p>
+          </body></html>
+        `);
+        this.logger.info('YouTube OAuth completed via hosted callback; restarting process to load it.');
+        setTimeout(() => process.exit(0), 1500);
+      } catch (tokenError) {
+        this.logger.error('YouTube token exchange failed', tokenError);
+        return res.status(500).send(`<h1>Token exchange failed</h1><p>${tokenError.message}</p>`);
+      }
+    });
+
     // Health check
     this.app.get('/health', (req, res) => {
       res.json({
