@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { getContentLanguage, languageInstruction } = require('../utils/content-language');
 
 class ContentStrategyAgent {
   constructor(db, credentials) {
@@ -332,7 +333,9 @@ class ContentStrategyAgent {
 
   async generateAutonomousPlanWithAI(channelStrategy, research, targetCount) {
     if (!this.aiTextService.isAvailable()) return [];
+    const language = await getContentLanguage(this.db);
     const prompt = `You are the strategy lead for an autonomous YouTube channel.
+${languageInstruction(language)} (topic, angle, and rationale still count as user-facing text.)
 Turn the channel strategy and the supplied research signals into a focused content plan.
 Return only a valid JSON array with exactly ${targetCount} items using this shape:
 [{"topic":"specific video topic","pillar":"one exact content pillar from the supplied strategy","angle":"distinct audience-relevant angle","rationale":"why this advances the channel objective using the supplied evidence","format":"explainer|tutorial|list|review|story","length":"short|medium|long","sourceUrls":["exact URL from the supplied source catalog"]}]
@@ -430,7 +433,9 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       .slice(0, 10)
       .map(topic => topic.topic)
       .join(', ');
+    const language = await getContentLanguage(this.db);
     const prompt = `You are selecting a YouTube content strategy.
+${languageInstruction(language)} (topic, angle, and target audience still count as user-facing text.)
 Return only valid JSON with this exact shape:
 {
   "topic": "specific video topic",

@@ -29,6 +29,7 @@ const { AudienceEngagementService } = require('./utils/audience-engagement-servi
 const { GrowthExperimentService } = require('./utils/growth-experiment-service');
 const { AITextService } = require('./utils/ai-text-service');
 const { DiscoverabilityService } = require('./utils/discoverability-service');
+const { isSupportedLanguage } = require('./utils/content-language');
 const { version } = require('./package.json');
 const chalk = require('chalk');
 
@@ -1878,6 +1879,11 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
     if (input.bannedTopics !== undefined) {
       const topics = Array.isArray(input.bannedTopics) ? input.bannedTopics : String(input.bannedTopics).split(',');
       result.bannedTopics = topics.map(topic => String(topic).trim()).filter(Boolean).slice(0, 50);
+    }
+    if (input.language !== undefined) {
+      const language = String(input.language).trim().toLowerCase();
+      if (!isSupportedLanguage(language)) throw new Error('Unsupported content language');
+      result.language = language;
     }
     return result;
   }

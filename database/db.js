@@ -545,6 +545,7 @@ class Database {
         banned_topics TEXT,
         visual_style TEXT,
         timezone TEXT,
+        content_language TEXT DEFAULT 'fr',
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       )`,
@@ -647,13 +648,16 @@ class Database {
     await this.ensureColumns('discoverability_audits', {
       error_code: 'TEXT'
     });
+    await this.ensureColumns('channel_profiles', {
+      content_language: "TEXT DEFAULT 'fr'"
+    });
 
     // Insert default settings
     await this.insertDefaultSettings();
   }
 
   async ensureColumns(tableName, columns) {
-    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits']);
+    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits', 'channel_profiles']);
     if (!allowedTables.has(tableName)) throw new Error(`Unsupported migration table: ${tableName}`);
     const existing = new Set((await this.getAllRows(`PRAGMA table_info(${tableName})`)).map(column => column.name));
     for (const [columnName, definition] of Object.entries(columns)) {
@@ -697,8 +701,8 @@ class Database {
     await this.executeQuery(
       `INSERT OR IGNORE INTO channel_profiles (
         id, channel_name, goal, target_audience, brand_voice, default_style,
-        call_to_action, banned_topics, visual_style, timezone
-      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        call_to_action, banned_topics, visual_style, timezone, content_language
+      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         process.env.CHANNEL_NAME || 'My YouTube Channel',
         'Grow a trusted, useful YouTube channel',
@@ -708,7 +712,8 @@ class Database {
         'Subscribe for more useful videos.',
         '[]',
         'Clean, high-contrast, and readable',
-        process.env.CHANNEL_TIMEZONE || 'America/Chicago'
+        process.env.CHANNEL_TIMEZONE || 'America/Chicago',
+        process.env.CHANNEL_LANGUAGE || 'fr'
       ]
     );
   }
@@ -1572,8 +1577,8 @@ class Database {
     await this.executeQuery(
       `INSERT OR REPLACE INTO channel_profiles (
         id, channel_name, goal, target_audience, brand_voice, default_style,
-        call_to_action, banned_topics, visual_style, timezone, created_at, updated_at
-      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))`,
+        call_to_action, banned_topics, visual_style, timezone, content_language, created_at, updated_at
+      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))`,
       [
         profile.channelName ?? current.channel_name ?? '',
         profile.goal ?? current.goal ?? '',
@@ -1584,6 +1589,7 @@ class Database {
         JSON.stringify(profile.bannedTopics ?? current.bannedTopics ?? []),
         profile.visualStyle ?? current.visual_style ?? '',
         profile.timezone ?? current.timezone ?? 'America/Chicago',
+        profile.language ?? current.content_language ?? 'fr',
         current.created_at || null
       ]
     );

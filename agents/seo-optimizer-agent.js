@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { getContentLanguage, languageInstruction } = require('../utils/content-language');
 
 class SEOOptimizerAgent {
   constructor(db, credentials) {
@@ -59,7 +60,8 @@ class SEOOptimizerAgent {
       
       // Calculate SEO score
       const seoScore = await this.calculateSEOScore(title, description, tags);
-      
+      const language = await getContentLanguage(this.db);
+
       const seoData = {
         title,
         description,
@@ -72,7 +74,7 @@ class SEOOptimizerAgent {
           primaryKeyword: strategy.keywords[0],
           secondaryKeywords: strategy.keywords.slice(1, 5),
           targetLength: this.calculateOptimalLength(strategy.contentType),
-          language: 'en',
+          language,
           category: this.selectCategory(strategy)
         },
         createdAt: new Date().toISOString()
@@ -95,7 +97,9 @@ class SEOOptimizerAgent {
       return null;
     }
 
+    const language = await getContentLanguage(this.db);
     const prompt = `You are optimizing YouTube metadata.
+${languageInstruction(language)}
 Return only valid JSON with this exact shape:
 {
   "title": "SEO title under 100 characters",

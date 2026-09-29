@@ -1,5 +1,6 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
+const { getContentLanguage, languageInstruction } = require('../utils/content-language');
 
 class ScriptWriterAgent {
   constructor(db, credentials) {
@@ -106,7 +107,9 @@ class ScriptWriterAgent {
       return null;
     }
 
+    const language = await getContentLanguage(this.db);
     const prompt = `You are writing a YouTube script plan.
+${languageInstruction(language)}
 Return only valid JSON with this exact shape:
 {
   "title": "compelling title under 100 characters",

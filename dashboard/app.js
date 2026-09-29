@@ -820,6 +820,7 @@ function populateSettings(profile = {}, settings = {}, providers = []) {
     callToAction: profile.call_to_action,
     visualStyle: profile.visual_style,
     timezone: profile.timezone,
+    language: profile.content_language || 'fr',
     bannedTopics: (profile.bannedTopics || []).join(', ')
   };
   for (const [name, value] of Object.entries(mapping)) {
