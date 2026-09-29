@@ -21,15 +21,40 @@ class PublishingSchedulingAgent {
     return true;
   }
 
+  // Legacy single-channel fallback client, used only when a schedule
+  // entry/video has no channel_id (pre-multi-channel data). Not fatal if
+  // missing — channels each carry their own OAuth tokens now.
   async setupYouTubeAPI() {
     try {
       const auth = this.credentials.getYouTubeAuth();
       this.youtube = google.youtube({ version: 'v3', auth });
-      this.logger.info('YouTube API initialized');
+      this.logger.info('YouTube API initialized (legacy single-channel fallback)');
     } catch (error) {
-      this.logger.error('Failed to initialize YouTube API:', error);
+      this.logger.warn(`No legacy YouTube connection available (${error.message}); per-channel connections will still work`);
+    }
+  }
+
+  // Resolves the YouTube client to use for a given channel. Each channel
+  // carries its own OAuth tokens (obtained via /auth/youtube/start?channelId=),
+  // built against the shared OAuth client (YOUTUBE_CLIENT_ID/SECRET) — one
+  // Google Cloud OAuth client can mint tokens for any number of channels.
+  async getYouTubeClientForChannel(channelId) {
+    if (!channelId) {
+      if (!this.youtube) throw new Error('No YouTube connection is configured for this content (no channel and no legacy fallback)');
+      return this.youtube;
+    }
+    const channel = await this.db.getChannelById(channelId);
+    if (!channel) throw new Error(`Channel ${channelId} not found`);
+    if (!channel.youtubeTokens?.refresh_token) {
+      const error = new Error(`Channel "${channel.name}" is not connected to YouTube`);
+      error.status = 409;
       throw error;
     }
+    const config = this.credentials.getYouTubeOAuthConfig();
+    if (!config) throw new Error('YouTube OAuth is not configured (YOUTUBE_CLIENT_ID/SECRET/REDIRECT_URI)');
+    const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
+    oauth2Client.setCredentials(channel.youtubeTokens);
+    return google.youtube({ version: 'v3', auth: oauth2Client });
   }
 
   async loadPublishQueue() {
@@ -197,6 +222,7 @@ class PublishingSchedulingAgent {
   }
 
   async uploadToYouTube(scheduleEntry, options = {}) {
+    const youtube = await this.getYouTubeClientForChannel(scheduleEntry.channel_id);
     const { metadata } = scheduleEntry;
     const validation = assertValidYouTubeMetadata(metadata.seo);
     if (validation.warnings.length) {
@@ -228,14 +254,14 @@ class PublishingSchedulingAgent {
     // Resolve the file before marking the network upload as attempted.
     const videoStream = await this.getVideoStream(metadata.video.path);
     scheduleEntry.uploadAttempted = true;
-    const videoUpload = await this.youtube.videos.insert({
+    const videoUpload = await youtube.videos.insert({
       part: 'snippet,status',
       requestBody: videoMetadata,
       media: {
         body: videoStream
       }
     });
-    
+
     const videoId = videoUpload.data.id;
     this.logger.info(`Video uploaded with ID: ${videoId}`);
     scheduleEntry.status = 'uploaded';
@@ -243,15 +269,15 @@ class PublishingSchedulingAgent {
     scheduleEntry.youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     scheduleEntry.error = null;
     await this.db.updateScheduleEntry(scheduleEntry);
-    
+
     // Upload thumbnail
     if (metadata.thumbnail && metadata.thumbnail.path) {
-      await this.uploadThumbnail(videoId, metadata.thumbnail.path);
+      await this.uploadThumbnail(youtube, videoId, metadata.thumbnail.path);
     }
-    
+
     // Upload captions
     if (metadata.captions && metadata.captions.path) {
-      await this.uploadCaptions(videoId, metadata.captions.path);
+      await this.uploadCaptions(youtube, videoId, metadata.captions.path);
     }
     
     return videoUpload.data;
@@ -276,7 +302,8 @@ class PublishingSchedulingAgent {
   }
 
   async reconcileUploadedVideo(scheduleEntry) {
-    const response = await this.youtube.videos.list({ part: 'id,status', id: scheduleEntry.youtubeId });
+    const youtube = await this.getYouTubeClientForChannel(scheduleEntry.channel_id);
+    const response = await youtube.videos.list({ part: 'id,status', id: scheduleEntry.youtubeId });
     if (!response.data.items?.some(video => video.id === scheduleEntry.youtubeId)) {
       scheduleEntry.status = 'reconciliation_required';
       scheduleEntry.error = 'The recorded YouTube video ID could not be verified';
@@ -322,24 +349,24 @@ class PublishingSchedulingAgent {
       throw new Error('video file not found — refusing to upload placeholder');
     }
   }
-  async uploadThumbnail(videoId, thumbnailPath) {
+  async uploadThumbnail(youtube, videoId, thumbnailPath) {
     try {
       const thumbnailBuffer = await fs.readFile(thumbnailPath);
-      
-      await this.youtube.thumbnails.set({
+
+      await youtube.thumbnails.set({
         videoId: videoId,
         media: {
           body: thumbnailBuffer
         }
       });
-      
+
       this.logger.info(`Thumbnail uploaded for video: ${videoId}`);
     } catch (error) {
       this.logger.error(`Failed to upload thumbnail: ${error.message}`);
     }
   }
 
-  async applyVideoPackaging(videoId, packaging = {}, previousPackaging = null) {
+  async applyVideoPackaging(videoId, packaging = {}, previousPackaging = null, channelId = null) {
     const title = String(packaging.title || '').trim();
     if (!videoId || !title || title.length > 100 || !packaging.thumbnailPath) {
       const error = new Error('A valid video ID, title, and thumbnail are required for a packaging change');
@@ -347,8 +374,9 @@ class PublishingSchedulingAgent {
       error.code = 'PACKAGING_INVALID';
       throw error;
     }
+    const youtube = await this.getYouTubeClientForChannel(channelId);
     const thumbnail = await fs.readFile(packaging.thumbnailPath);
-    const current = await this.youtube.videos.list({ part: 'snippet', id: videoId });
+    const current = await youtube.videos.list({ part: 'snippet', id: videoId });
     const snippet = current.data.items?.[0]?.snippet;
     if (!snippet) {
       const error = new Error(`YouTube video not found: ${videoId}`);
@@ -357,7 +385,7 @@ class PublishingSchedulingAgent {
       throw error;
     }
 
-    const updateTitle = async nextTitle => this.youtube.videos.update({
+    const updateTitle = async nextTitle => youtube.videos.update({
       part: 'snippet',
       requestBody: {
         id: videoId,
@@ -374,7 +402,7 @@ class PublishingSchedulingAgent {
 
     await updateTitle(title);
     try {
-      await this.youtube.thumbnails.set({
+      await youtube.thumbnails.set({
         videoId,
         media: { body: thumbnail }
       });
@@ -390,11 +418,11 @@ class PublishingSchedulingAgent {
     return { videoId, title, thumbnailPath: packaging.thumbnailPath };
   }
 
-  async uploadCaptions(videoId, captionsPath) {
+  async uploadCaptions(youtube, videoId, captionsPath) {
     try {
       const captionsContent = await fs.readFile(captionsPath, 'utf8');
-      
-      await this.youtube.captions.insert({
+
+      await youtube.captions.insert({
         part: 'snippet',
         requestBody: {
           snippet: {

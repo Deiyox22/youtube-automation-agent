@@ -23,9 +23,12 @@ function languageName(code) {
   return LANGUAGE_NAMES[code] || LANGUAGE_NAMES[DEFAULT_LANGUAGE];
 }
 
-async function getContentLanguage(db) {
+// Pass the channel this content belongs to when known (multi-channel):
+// its own content_language wins. Falls back to the legacy single-profile
+// setting only when no channelId is given (pre-multi-channel call sites).
+async function getContentLanguage(db, channelId) {
   try {
-    const profile = await db.getChannelProfile();
+    const profile = channelId ? await db.getChannelById(channelId) : await db.getChannelProfile();
     const code = profile?.content_language;
     return isSupportedLanguage(code) ? code : DEFAULT_LANGUAGE;
   } catch (_error) {

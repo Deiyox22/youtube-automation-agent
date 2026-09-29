@@ -429,13 +429,14 @@ class GrowthExperimentService {
 
   async applyArm(experiment, arm, previousArm) {
     if (!arm) throw this.error('Experiment arm is missing', 409, 'EXPERIMENT_STATE_INVALID');
+    const production = await this.db.getRow('SELECT channel_id FROM productions WHERE id = ?', [experiment.productionId]);
     await this.publishing.applyVideoPackaging(experiment.videoId, {
       title: arm.title,
       thumbnailPath: arm.thumbnailPath
     }, previousArm ? {
       title: previousArm.title,
       thumbnailPath: previousArm.thumbnailPath
-    } : null);
+    } : null, production?.channel_id || null);
   }
 
   async failRestore(experiment, error, result = {}) {

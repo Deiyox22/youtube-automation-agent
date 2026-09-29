@@ -227,11 +227,11 @@ class ContentStrategyAgent {
       .slice(0, 50);
   }
 
-  async generateContentStrategy(requestedTopic = null) {
+  async generateContentStrategy(requestedTopic = null, channelId = null) {
     try {
       let topic, angle, targetAudience, contentType;
 
-      const aiStrategy = await this.generateContentStrategyWithAI(requestedTopic);
+      const aiStrategy = await this.generateContentStrategyWithAI(requestedTopic, channelId);
       if (aiStrategy) {
         await this.db.saveContentStrategy(aiStrategy);
         this.logger.info(`Generated AI strategy for: ${aiStrategy.topic}`);
@@ -333,7 +333,7 @@ class ContentStrategyAgent {
 
   async generateAutonomousPlanWithAI(channelStrategy, research, targetCount) {
     if (!this.aiTextService.isAvailable()) return [];
-    const language = await getContentLanguage(this.db);
+    const language = await getContentLanguage(this.db, channelStrategy.channel_id);
     const prompt = `You are the strategy lead for an autonomous YouTube channel.
 ${languageInstruction(language)} (topic, angle, and rationale still count as user-facing text.)
 Turn the channel strategy and the supplied research signals into a focused content plan.
@@ -423,7 +423,7 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       .slice(0, targetCount);
   }
 
-  async generateContentStrategyWithAI(requestedTopic = null) {
+  async generateContentStrategyWithAI(requestedTopic = null, channelId = null) {
     if (!this.aiTextService.isAvailable()) {
       this.logger.info('Using template content strategy generation because no AI text provider is configured');
       return null;
@@ -433,7 +433,7 @@ Do not invent trend data, statistics, sources, URLs, or factual claims. Use only
       .slice(0, 10)
       .map(topic => topic.topic)
       .join(', ');
-    const language = await getContentLanguage(this.db);
+    const language = await getContentLanguage(this.db, channelId);
     const prompt = `You are selecting a YouTube content strategy.
 ${languageInstruction(language)} (topic, angle, and target audience still count as user-facing text.)
 Return only valid JSON with this exact shape:

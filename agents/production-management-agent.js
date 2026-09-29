@@ -57,6 +57,7 @@ class ProductionManagementAgent {
       
       const productionData = {
         id: productionId,
+        channelId: strategy.channelId || null,
         strategy,
         script,
         thumbnail,

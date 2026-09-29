@@ -60,7 +60,7 @@ class SEOOptimizerAgent {
       
       // Calculate SEO score
       const seoScore = await this.calculateSEOScore(title, description, tags);
-      const language = await getContentLanguage(this.db);
+      const language = await getContentLanguage(this.db, strategy.channelId);
 
       const seoData = {
         title,
@@ -97,7 +97,7 @@ class SEOOptimizerAgent {
       return null;
     }
 
-    const language = await getContentLanguage(this.db);
+    const language = await getContentLanguage(this.db, strategy.channelId);
     const prompt = `You are optimizing YouTube metadata.
 ${languageInstruction(language)}
 Return only valid JSON with this exact shape:

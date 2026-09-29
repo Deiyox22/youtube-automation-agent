@@ -292,7 +292,12 @@ class YouTubeAutomationAgent {
       return { valid: false, status: 400, error: 'Request body must be a JSON object' };
     }
 
+    if (typeof body.channelId !== 'string' || !body.channelId.trim()) {
+      return { valid: false, status: 400, error: 'channelId is required' };
+    }
+
     const value = {
+      channelId: body.channelId.trim(),
       topic: null,
       style: null,
       length: typeof body.length === 'string' ? body.length.toLowerCase() : 'medium',
@@ -655,8 +660,8 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
           return res.status(validation.status).json({ success: false, error: validation.error });
         }
 
-        const { topic, style, length } = validation.value;
-        const result = await this.startGenerationJob({ topic, style, length, source: 'manual' });
+        const { topic, style, length, channelId } = validation.value;
+        const result = await this.startGenerationJob({ topic, style, length, channelId, source: 'manual' });
         res.status(202).json({ success: true, result });
       } catch (error) {
         res.status(error.status || 500).json({ success: false, error: error.message });
@@ -719,18 +724,19 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
   setupOperatorAPI() {
     const protect = this.requireAPIKey();
 
-    this.app.get('/api/dashboard', async (_req, res) => {
+    this.app.get('/api/dashboard', async (req, res) => {
       try {
+        const channelId = req.query.channelId ? String(req.query.channelId) : null;
         const [stats, jobs, pipeline, schedule, events, notifications, profile, settings, ideas, analytics, learning, activation, channelStrategy, operatorRuns, readiness, engagement, experiments, channels] = await Promise.all([
-          this.db.getStats(),
-          this.db.listGenerationJobs(20),
-          this.db.getPipelineOverview(50),
-          this.db.getUpcomingSchedule(30),
+          this.db.getStats(channelId),
+          this.db.listGenerationJobs(channelId, 20),
+          this.db.getPipelineOverview(channelId, 50),
+          this.db.getUpcomingSchedule(30, channelId),
           this.db.getRecentAutomationEvents(20),
           this.db.listNotifications(20),
-          this.db.getChannelProfile(),
+          channelId ? this.db.getChannelById(channelId) : this.db.getChannelProfile(),
           this.db.getAllSettings(),
-          this.db.listContentIdeas(),
+          this.db.listContentIdeas(channelId),
           this.agents.analytics
             ? this.agents.analytics.getRecentAnalytics(30)
             : Promise.resolve({ totalVideos: 0, averagePerformanceScore: 0, topPerformers: [], insights: [] }),
@@ -740,8 +746,8 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
           this.activation
             ? this.activation.getSummary()
             : Promise.resolve({ privacy: 'local-only', counts: {}, milestones: {} }),
-          this.db.getChannelStrategy(),
-          this.db.listOperatorRuns(10),
+          channelId ? this.db.getChannelStrategy(channelId) : Promise.resolve(null),
+          this.db.listOperatorRuns(channelId, 10),
           this.readiness
             ? this.readiness.getSummary()
             : Promise.resolve({ status: 'unverified', stale: false, blockingFailures: [], checks: [] }),
@@ -769,7 +775,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
             activeJobs: this.activeJobs.size,
             automationPaused: this.scheduler ? !this.scheduler.isEnabled : true,
             agents: Object.keys(this.agents),
-            autonomousRunning: Boolean(await this.db.getActiveOperatorRun()),
+            autonomousRunning: Boolean(channelId && await this.db.getActiveOperatorRun(channelId)),
             videoProviders: this.agents.production?.aiVideoGenerator?.mediaGeneration?.listProviders() || []
           }
         });
@@ -1166,9 +1172,11 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
 
     this.app.put('/api/operator/strategy', protect, async (req, res) => {
       try {
-        const current = await this.db.getChannelStrategy() || {};
+        const channelId = req.body?.channelId;
+        if (!channelId) return res.status(400).json({ success: false, error: 'channelId is required' });
+        const current = await this.db.getChannelStrategy(channelId) || {};
         const strategy = this.validateChannelStrategy(req.body || {}, current);
-        return res.json({ success: true, result: await this.db.saveChannelStrategy(strategy) });
+        return res.json({ success: true, result: await this.db.saveChannelStrategy(channelId, strategy) });
       } catch (error) {
         return res.status(400).json({ success: false, error: error.message });
       }
@@ -1176,16 +1184,15 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
 
     this.app.post('/api/operator/start', protect, async (req, res) => {
       try {
+        const channelId = req.body?.channelId;
+        if (!channelId) return res.status(400).json({ success: false, error: 'channelId is required' });
         if (this.setupRequired || !this.agents.strategy) {
           return res.status(503).json({ success: false, error: 'Finish setup with npm run walkthrough before activating the autonomous operator' });
         }
-        if (this.activeJobs.size) {
-          return res.status(409).json({ success: false, error: 'Wait for the current generation job to finish before starting an autonomous run' });
-        }
         await this.readiness?.assertReady('Autonomous production');
-        const current = await this.db.getChannelStrategy() || {};
+        const current = await this.db.getChannelStrategy(channelId) || {};
         const strategy = this.validateChannelStrategy({ ...(req.body || {}), status: 'active' }, current);
-        const saved = await this.db.saveChannelStrategy(strategy);
+        const saved = await this.db.saveChannelStrategy(channelId, strategy);
         const run = await this.autonomous.start(saved);
         return res.status(202).json({ success: true, result: run });
       } catch (error) {
@@ -1193,12 +1200,14 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       }
     });
 
-    this.app.post('/api/operator/pause', protect, async (_req, res) => {
-      const strategy = await this.db.getChannelStrategy();
+    this.app.post('/api/operator/pause', protect, async (req, res) => {
+      const channelId = req.body?.channelId;
+      if (!channelId) return res.status(400).json({ error: 'channelId is required' });
+      const strategy = await this.db.getChannelStrategy(channelId);
       if (!strategy) return res.status(404).json({ error: 'Channel strategy not found' });
-      const active = await this.db.getActiveOperatorRun();
+      const active = await this.db.getActiveOperatorRun(channelId);
       if (active) await this.autonomous.cancel(active.id);
-      const saved = await this.db.saveChannelStrategy({ ...strategy, status: 'paused' });
+      const saved = await this.db.saveChannelStrategy(channelId, { ...strategy, status: 'paused' });
       return res.json({ success: true, result: saved });
     });
 
@@ -1218,7 +1227,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
         if (!this.provenance) this.provenance = new ProvenanceService(this.db);
         await this.provenance.review(bundle.id, req.body || {});
         const updated = await this.db.getProductionBundle(bundle.id);
-        const profile = await this.db.getChannelProfile() || {};
+        const profile = (updated.channel_id ? await this.db.getChannelById(updated.channel_id) : await this.db.getChannelProfile()) || {};
         const quality = await this.operator.runQualityChecks({
           ...updated,
           scheduledPublishTime: updated.scheduled_publish_time
@@ -1243,7 +1252,9 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
           return res.status(503).json({ success: false, error: 'Finish setup before resuming the autonomous operator' });
         }
         await this.readiness?.assertReady('Autonomous production recovery');
-        const strategy = await this.db.getChannelStrategy();
+        const existingRun = await this.db.getOperatorRun(req.params.runId);
+        if (!existingRun) return res.status(404).json({ success: false, error: 'Operator run not found' });
+        const strategy = await this.db.getChannelStrategy(existingRun.channel_id);
         const run = await this.autonomous.resume(req.params.runId, strategy);
         return res.status(202).json({ success: true, result: run });
       } catch (error) {
@@ -1273,7 +1284,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       try {
         const bundle = await this.db.getProductionBundle(req.params.productionId);
         if (!bundle) return res.status(404).json({ success: false, error: 'Content not found' });
-        const profile = await this.db.getChannelProfile() || {};
+        const profile = (bundle.channel_id ? await this.db.getChannelById(bundle.channel_id) : await this.db.getChannelProfile()) || {};
         const audit = await this.discoverability.auditProduction(bundle, profile, req.body?.platform || 'youtube');
         if (bundle.review_status !== 'approved' && !bundle.schedule) {
           const updated = await this.db.getProductionBundle(bundle.id);
@@ -1516,7 +1527,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
     this.app.post('/api/ideas/:ideaId/generate', protect, async (req, res) => {
       const idea = await this.db.updateContentIdea(req.params.ideaId, { status: 'generating' });
       if (!idea) return res.status(404).json({ error: 'Idea not found' });
-      const job = await this.startGenerationJob({ topic: idea.topic, style: idea.style, length: req.body?.length || 'medium', source: 'idea' });
+      const job = await this.startGenerationJob({ topic: idea.topic, style: idea.style, length: req.body?.length || 'medium', channelId: idea.channel_id, source: 'idea' });
       await this.db.updateContentIdea(idea.id, { status: 'generated' });
       return res.status(202).json({ success: true, result: job });
     });
@@ -1650,6 +1661,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       topic: job.topic,
       style: job.style,
       length: job.length || 'medium',
+      channelId: job.channel_id,
       strategyContext: job.details?.strategyContext || {}
     };
     const updated = await this.db.updateGenerationJob(job.id, {
@@ -1680,12 +1692,14 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
   }
 
   async queueScheduledContent(input = {}) {
-    const strategy = await this.db.getChannelStrategy();
+    const channelId = input.channelId;
+    const strategy = channelId ? await this.db.getChannelStrategy(channelId) : null;
     if (strategy?.status === 'active') {
       const weeklyOutput = await this.db.getRow(
         `SELECT COUNT(*) AS count FROM generation_jobs
-         WHERE source = 'autonomous_operator' AND status = 'completed'
-         AND created_at >= datetime('now', '-7 days')`
+         WHERE source = 'autonomous_operator' AND status = 'completed' AND channel_id = ?
+         AND created_at >= datetime('now', '-7 days')`,
+        [channelId]
       );
       const remaining = Math.max(1, strategy.cadence_per_week - Number(weeklyOutput?.count || 0));
       return this.autonomous.start({
@@ -1701,6 +1715,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       await this.db.updateGenerationJob(jobId, { status: 'running', progress: 2, error: null, completedAt: null });
       const result = await this.generateContent(input.topic, input.style, input.length, {
         jobId,
+        channelId: input.channelId,
         strategyContext: input.strategyContext
       });
       await this.db.updateGenerationJob(jobId, {
@@ -1749,14 +1764,15 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
 
   async generateContent(topic = null, style = null, length = 'medium', options = {}) {
     this.logger.info('Starting content generation pipeline...');
-    const { jobId = null, strategyContext: rawStrategyContext = {} } = options;
+    const { jobId = null, channelId = null, strategyContext: rawStrategyContext = {} } = options;
     const strategyContext = rawStrategyContext || {};
-    const profile = await this.db.getChannelProfile() || {};
+    const profile = (channelId ? await this.db.getChannelById(channelId) : await this.db.getChannelProfile()) || {};
     const lengthLabels = { short: '2-4 minutes', medium: '8-12 minutes', long: '15-20 minutes' };
 
     // Step 1: Strategy
     const strategy = await this.runGenerationStage(jobId, 'strategy', 10, async () => {
-      const generated = await this.agents.strategy.generateContentStrategy(topic);
+      const generated = await this.agents.strategy.generateContentStrategy(topic, channelId);
+      generated.channelId = channelId;
       const contentStyles = new Set(['tutorial', 'explainer', 'list', 'review', 'story']);
       const requestedStyle = style || profile.default_style || null;
       if (requestedStyle && contentStyles.has(requestedStyle.toLowerCase())) {
@@ -2089,7 +2105,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
   async refreshContentReview(productionId, reviewNotes) {
     const bundle = await this.db.getProductionBundle(productionId);
     if (!bundle) return null;
-    const profile = await this.db.getChannelProfile() || {};
+    const profile = (bundle.channel_id ? await this.db.getChannelById(bundle.channel_id) : await this.db.getChannelProfile()) || {};
     const quality = await this.operator.runQualityChecks({
       ...bundle,
       scheduledPublishTime: bundle.scheduled_publish_time
@@ -2129,6 +2145,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
     }
     const productionData = {
       id: bundle.id,
+      channelId: bundle.channel_id,
       status: bundle.status,
       strategy: bundle.strategy,
       script: { ...bundle.script, title: editorData.title || bundle.script.title },
@@ -2151,7 +2168,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       containsSyntheticMedia: bundle.provenance?.containsSyntheticMedia === true,
       scenes: bundle.scenes || []
     };
-    const profile = await this.db.getChannelProfile() || {};
+    const profile = (bundle.channel_id ? await this.db.getChannelById(bundle.channel_id) : await this.db.getChannelProfile()) || {};
     const quality = await this.operator.runQualityChecks(productionData, profile);
     if (!quality.passed) {
       await this.db.saveContentReview(bundle.id, {

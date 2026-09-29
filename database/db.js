@@ -98,6 +98,7 @@ class Database {
       // Production Data
       `CREATE TABLE IF NOT EXISTS productions (
         id TEXT PRIMARY KEY,
+        channel_id TEXT,
         strategy_id TEXT,
         script_id TEXT,
         thumbnail_id TEXT,
@@ -118,6 +119,7 @@ class Database {
       // Publishing Schedule
       `CREATE TABLE IF NOT EXISTS publish_schedule (
         id TEXT PRIMARY KEY,
+        channel_id TEXT,
         production_id TEXT NOT NULL,
         title TEXT NOT NULL,
         publish_time TEXT NOT NULL,
@@ -340,6 +342,7 @@ class Database {
       )`,
       `CREATE TABLE IF NOT EXISTS generation_jobs (
         id TEXT PRIMARY KEY,
+        channel_id TEXT,
         topic TEXT,
         style TEXT,
         length TEXT DEFAULT 'medium',
@@ -551,6 +554,7 @@ class Database {
       )`,
       `CREATE TABLE IF NOT EXISTS content_ideas (
         id TEXT PRIMARY KEY,
+        channel_id TEXT,
         topic TEXT NOT NULL,
         angle TEXT,
         style TEXT,
@@ -562,6 +566,7 @@ class Database {
       )`,
       `CREATE TABLE IF NOT EXISTS channel_strategies (
         id TEXT PRIMARY KEY,
+        channel_id TEXT UNIQUE,
         objective TEXT NOT NULL,
         audience TEXT NOT NULL,
         value_proposition TEXT,
@@ -583,6 +588,7 @@ class Database {
       )`,
       `CREATE TABLE IF NOT EXISTS operator_runs (
         id TEXT PRIMARY KEY,
+        channel_id TEXT,
         strategy_id TEXT NOT NULL,
         status TEXT DEFAULT 'queued',
         stage TEXT DEFAULT 'queued',
@@ -685,12 +691,51 @@ class Database {
       youtube_stats_updated_at: 'TEXT'
     });
 
+    // Multi-channel: these tables predate per-channel scoping. Add the
+    // column for databases created before it existed, then backfill any
+    // NULL channel_id to the oldest channel (the one migrateLegacyChannel
+    // creates from a pre-multi-channel setup), so existing history stays
+    // attached to a real channel instead of becoming orphaned/invisible.
+    await this.ensureColumns('channel_strategies', { channel_id: 'TEXT' });
+    await this.ensureColumns('content_ideas', { channel_id: 'TEXT' });
+    await this.ensureColumns('generation_jobs', { channel_id: 'TEXT' });
+    await this.ensureColumns('productions', { channel_id: 'TEXT' });
+    await this.ensureColumns('publish_schedule', { channel_id: 'TEXT' });
+    await this.ensureColumns('operator_runs', { channel_id: 'TEXT' });
+    await this.executeQuery(
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_strategies_channel_id ON channel_strategies(channel_id)'
+    );
+    await this.backfillChannelScopedTables();
+
     // Insert default settings
     await this.insertDefaultSettings();
   }
 
+  async backfillChannelScopedTables() {
+    const oldest = await this.getRow('SELECT id FROM channels ORDER BY created_at ASC LIMIT 1');
+    if (!oldest) return;
+    // The legacy singleton strategy used the fixed id 'default'; give it a
+    // real generated id once it's tied to a channel; conflict means a
+    // channel-scoped strategy already exists for that channel (nothing to do).
+    const legacyStrategy = await this.getRow("SELECT id FROM channel_strategies WHERE id = 'default' AND channel_id IS NULL");
+    if (legacyStrategy) {
+      await this.executeQuery('UPDATE channel_strategies SET channel_id = ? WHERE id = ?', [oldest.id, legacyStrategy.id]).catch(() => {});
+    }
+    await this.executeQuery('UPDATE content_ideas SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery('UPDATE generation_jobs SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery('UPDATE productions SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery('UPDATE publish_schedule SET channel_id = ? WHERE channel_id IS NULL', [oldest.id]);
+    await this.executeQuery(
+      `UPDATE operator_runs SET channel_id = (SELECT channel_id FROM channel_strategies WHERE channel_strategies.id = operator_runs.strategy_id)
+       WHERE channel_id IS NULL`
+    );
+  }
+
   async ensureColumns(tableName, columns) {
-    const allowedTables = new Set(['production_scenes', 'channel_strategies', 'discoverability_audits', 'channel_profiles', 'channels']);
+    const allowedTables = new Set([
+      'production_scenes', 'channel_strategies', 'discoverability_audits', 'channel_profiles', 'channels',
+      'content_ideas', 'generation_jobs', 'productions', 'publish_schedule', 'operator_runs'
+    ]);
     if (!allowedTables.has(tableName)) throw new Error(`Unsupported migration table: ${tableName}`);
     const existing = new Set((await this.getAllRows(`PRAGMA table_info(${tableName})`)).map(column => column.name));
     for (const [columnName, definition] of Object.entries(columns)) {
@@ -849,13 +894,15 @@ class Database {
 
   // Production methods
   async saveProductionData(production) {
+    const current = await this.getRow('SELECT channel_id FROM productions WHERE id = ?', [production.id]);
     await this.executeQuery(
       `INSERT OR REPLACE INTO productions (
-        id, status, assets, timeline, scheduled_publish_time, 
+        id, channel_id, status, assets, timeline, scheduled_publish_time,
         priority, estimated_duration
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         production.id,
+        production.channelId ?? current?.channel_id ?? null,
         production.status,
         JSON.stringify(production.assets),
         JSON.stringify(production.timeline),
@@ -864,7 +911,7 @@ class Database {
         production.estimatedDuration
       ]
     );
-  
+
     return production.id;
   }
 
@@ -959,10 +1006,10 @@ class Database {
     };
   }
 
-  async getPipelineOverview(limit = 50) {
+  async getPipelineOverview(channelId, limit = 50) {
     const rows = await this.getAllRows(
       `SELECT p.id, p.status, p.assets, p.timeline, p.scheduled_publish_time,
-              p.priority, p.estimated_duration, p.created_at,
+              p.priority, p.estimated_duration, p.created_at, p.channel_id,
               ps.strategy, ps.script, ps.seo,
               cr.status AS review_status, cr.quality_checks,
               sch.id AS schedule_id, sch.status AS schedule_status,
@@ -973,8 +1020,9 @@ class Database {
        LEFT JOIN publish_schedule sch ON sch.id = (
          SELECT id FROM publish_schedule WHERE production_id = p.id ORDER BY created_at DESC LIMIT 1
        )
+       ${channelId ? 'WHERE p.channel_id = ?' : ''}
        ORDER BY p.created_at DESC LIMIT ?`,
-      [limit]
+      channelId ? [channelId, limit] : [limit]
     );
     return rows.map(row => {
       const strategy = JSON.parse(row.strategy || '{}');
@@ -1006,9 +1054,9 @@ class Database {
     };
     await this.executeQuery(
       `INSERT INTO generation_jobs (
-        id, topic, style, length, source, status, stage, progress, details
-      ) VALUES (?, ?, ?, ?, ?, 'queued', 'queued', 0, ?)`,
-      [id, input.topic || null, input.style || null, input.length || 'medium', input.source || 'manual', JSON.stringify(details)]
+        id, channel_id, topic, style, length, source, status, stage, progress, details
+      ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?)`,
+      [id, input.channelId || null, input.topic || null, input.style || null, input.length || 'medium', input.source || 'manual', JSON.stringify(details)]
     );
     return this.getGenerationJob(id);
   }
@@ -1042,8 +1090,10 @@ class Database {
     return this.getGenerationJob(id);
   }
 
-  async listGenerationJobs(limit = 30) {
-    const rows = await this.getAllRows('SELECT * FROM generation_jobs ORDER BY created_at DESC LIMIT ?', [limit]);
+  async listGenerationJobs(channelId, limit = 30) {
+    const rows = channelId
+      ? await this.getAllRows('SELECT * FROM generation_jobs WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?', [channelId, limit])
+      : await this.getAllRows('SELECT * FROM generation_jobs ORDER BY created_at DESC LIMIT ?', [limit]);
     return Promise.all(rows.map(async row => {
       const job = { ...row, details: JSON.parse(row.details || '{}'), cancelRequested: Boolean(row.cancel_requested) };
       job.checkpoints = await this.listGenerationCheckpoints(job.id);
@@ -1752,15 +1802,17 @@ class Database {
   async createContentIdea(idea) {
     const id = this.generateId('idea');
     await this.executeQuery(
-      `INSERT INTO content_ideas (id, topic, angle, style, status, rationale, scheduled_for)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, idea.topic, idea.angle || null, idea.style || 'explainer', idea.status || 'backlog', idea.rationale || null, idea.scheduledFor || null]
+      `INSERT INTO content_ideas (id, channel_id, topic, angle, style, status, rationale, scheduled_for)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, idea.channelId || null, idea.topic, idea.angle || null, idea.style || 'explainer', idea.status || 'backlog', idea.rationale || null, idea.scheduledFor || null]
     );
     return this.getRow('SELECT * FROM content_ideas WHERE id = ?', [id]);
   }
 
-  async listContentIdeas() {
-    return this.getAllRows("SELECT * FROM content_ideas WHERE status != 'archived' ORDER BY COALESCE(scheduled_for, '9999-12-31'), created_at DESC");
+  async listContentIdeas(channelId) {
+    return channelId
+      ? this.getAllRows("SELECT * FROM content_ideas WHERE status != 'archived' AND channel_id = ? ORDER BY COALESCE(scheduled_for, '9999-12-31'), created_at DESC", [channelId])
+      : this.getAllRows("SELECT * FROM content_ideas WHERE status != 'archived' ORDER BY COALESCE(scheduled_for, '9999-12-31'), created_at DESC");
   }
 
   async updateContentIdea(id, changes) {
@@ -1782,21 +1834,29 @@ class Database {
     return this.getRow('SELECT * FROM content_ideas WHERE id = ?', [id]);
   }
 
-  async getChannelStrategy() {
-    const row = await this.getRow("SELECT * FROM channel_strategies WHERE id = 'default'");
+  async getChannelStrategy(channelId) {
+    if (!channelId) return null;
+    const row = await this.getRow('SELECT * FROM channel_strategies WHERE channel_id = ?', [channelId]);
     return row ? this.deserializeChannelStrategy(row) : null;
   }
 
-  async saveChannelStrategy(strategy) {
-    const current = await this.getChannelStrategy() || {};
+  async listChannelStrategies() {
+    const rows = await this.getAllRows("SELECT * FROM channel_strategies WHERE channel_id IS NOT NULL AND status = 'active'");
+    return rows.map(row => this.deserializeChannelStrategy(row));
+  }
+
+  async saveChannelStrategy(channelId, strategy) {
+    if (!channelId) throw new Error('channelId is required to save a channel strategy');
+    const current = await this.getChannelStrategy(channelId) || {};
+    const id = current.id || this.generateId('strategy');
     await this.executeQuery(
       `INSERT INTO channel_strategies (
-        id, objective, audience, value_proposition, content_pillars, cadence_per_week,
+        id, channel_id, objective, audience, value_proposition, content_pillars, cadence_per_week,
         videos_per_run, default_format, default_length, success_metric, primary_kpi,
         target_value, target_window_days, monthly_budget, outcome_currency, constraints,
         status, created_at, updated_at
-      ) VALUES ('default', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))
-      ON CONFLICT(id) DO UPDATE SET
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), datetime('now'))
+      ON CONFLICT(channel_id) DO UPDATE SET
         objective = excluded.objective, audience = excluded.audience,
         value_proposition = excluded.value_proposition, content_pillars = excluded.content_pillars,
         cadence_per_week = excluded.cadence_per_week, videos_per_run = excluded.videos_per_run,
@@ -1807,6 +1867,8 @@ class Database {
         constraints = excluded.constraints,
         status = excluded.status, updated_at = datetime('now')`,
       [
+        id,
+        channelId,
         strategy.objective ?? current.objective ?? '',
         strategy.audience ?? current.audience ?? '',
         strategy.valueProposition ?? current.value_proposition ?? '',
@@ -1826,7 +1888,7 @@ class Database {
         current.created_at || null
       ]
     );
-    return this.getChannelStrategy();
+    return this.getChannelStrategy(channelId);
   }
 
   deserializeChannelStrategy(row) {
@@ -1836,12 +1898,12 @@ class Database {
     };
   }
 
-  async createOperatorRun(strategyId = 'default') {
+  async createOperatorRun(strategyId, channelId) {
     const id = this.generateId('operator');
     await this.executeQuery(
-      `INSERT INTO operator_runs (id, strategy_id, research, plan, generated_jobs, summary)
-       VALUES (?, ?, '{}', '[]', '[]', '{}')`,
-      [id, strategyId]
+      `INSERT INTO operator_runs (id, channel_id, strategy_id, research, plan, generated_jobs, summary)
+       VALUES (?, ?, ?, '{}', '[]', '[]', '{}')`,
+      [id, channelId, strategyId]
     );
     return this.getOperatorRun(id);
   }
@@ -1851,15 +1913,26 @@ class Database {
     return row ? this.deserializeOperatorRun(row) : null;
   }
 
-  async getActiveOperatorRun() {
+  async getActiveOperatorRun(channelId) {
+    if (!channelId) return null;
     const row = await this.getRow(
-      "SELECT * FROM operator_runs WHERE status IN ('queued', 'running', 'cancelling') ORDER BY created_at DESC LIMIT 1"
+      "SELECT * FROM operator_runs WHERE channel_id = ? AND status IN ('queued', 'running', 'cancelling') ORDER BY created_at DESC LIMIT 1",
+      [channelId]
     );
     return row ? this.deserializeOperatorRun(row) : null;
   }
 
-  async listOperatorRuns(limit = 10) {
-    const rows = await this.getAllRows('SELECT * FROM operator_runs ORDER BY created_at DESC LIMIT ?', [limit]);
+  async listActiveOperatorRuns() {
+    const rows = await this.getAllRows(
+      "SELECT * FROM operator_runs WHERE status IN ('queued', 'running', 'cancelling')"
+    );
+    return rows.map(row => this.deserializeOperatorRun(row));
+  }
+
+  async listOperatorRuns(channelId, limit = 10) {
+    const rows = channelId
+      ? await this.getAllRows('SELECT * FROM operator_runs WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?', [channelId, limit])
+      : await this.getAllRows('SELECT * FROM operator_runs ORDER BY created_at DESC LIMIT ?', [limit]);
     return rows.map(row => this.deserializeOperatorRun(row));
   }
 
@@ -1928,14 +2001,16 @@ class Database {
     if (existing) return existing;
     const id = this.generateId('schedule');
     entry.id = id;
-    
+    const production = await this.getRow('SELECT channel_id FROM productions WHERE id = ?', [entry.productionId]);
+
     await this.executeQuery(
       `INSERT INTO publish_schedule (
-        id, production_id, title, publish_time, status, 
+        id, channel_id, production_id, title, publish_time, status,
         priority, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
+        production?.channel_id || null,
         entry.productionId,
         entry.title,
         entry.publishTime,
@@ -1944,7 +2019,7 @@ class Database {
         JSON.stringify(entry.metadata)
       ]
     );
-    
+
     return entry;
   }
 
@@ -1995,27 +2070,30 @@ class Database {
     };
   }
 
-  async getPublishQueue() {
+  async getPublishQueue(channelId = null) {
     const rows = await this.getAllRows(
       `SELECT * FROM publish_schedule
        WHERE status IN ('scheduled', 'paused')
-       ORDER BY publish_time ASC`
+       ${channelId ? 'AND channel_id = ?' : ''}
+       ORDER BY publish_time ASC`,
+      channelId ? [channelId] : []
     );
 
     return rows.map(row => this.deserializeScheduleEntry(row));
   }
 
-  async getUpcomingSchedule(days = 7) {
+  async getUpcomingSchedule(days = 7, channelId = null) {
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + days);
-    
+
     const rows = await this.getAllRows(
-      `SELECT * FROM publish_schedule 
+      `SELECT * FROM publish_schedule
        WHERE publish_time BETWEEN datetime('now') AND datetime(?)
+       ${channelId ? 'AND channel_id = ?' : ''}
        ORDER BY publish_time ASC`,
-      [endDate.toISOString()]
+      channelId ? [endDate.toISOString(), channelId] : [endDate.toISOString()]
     );
-    
+
     return rows.map(row => this.deserializeScheduleEntry(row));
   }
 
@@ -3044,7 +3122,7 @@ class Database {
     }
   }
 
-  async getStats() {
+  async getStats(channelId = null) {
     const [
       strategiesCount,
       scriptsCount,
@@ -3054,8 +3132,12 @@ class Database {
     ] = await Promise.all([
       this.getRow('SELECT COUNT(*) as count FROM content_strategies'),
       this.getRow('SELECT COUNT(*) as count FROM scripts'),
-      this.getRow('SELECT COUNT(*) as count FROM productions'),
-      this.getRow('SELECT COUNT(*) as count FROM publish_schedule WHERE status = "published"'),
+      channelId
+        ? this.getRow('SELECT COUNT(*) as count FROM productions WHERE channel_id = ?', [channelId])
+        : this.getRow('SELECT COUNT(*) as count FROM productions'),
+      channelId
+        ? this.getRow('SELECT COUNT(*) as count FROM publish_schedule WHERE status = "published" AND channel_id = ?', [channelId])
+        : this.getRow('SELECT COUNT(*) as count FROM publish_schedule WHERE status = "published"'),
       this.getRow('SELECT COUNT(*) as count FROM analytics_reports')
     ]);
 

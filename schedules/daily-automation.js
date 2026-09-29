@@ -108,102 +108,66 @@ class DailyAutomation {
   }
 
   async runDailyContentGeneration() {
+    const timer = this.logger.startTimer('Daily Content Generation');
     try {
-      this.logger.info('Starting daily content generation...');
-      
-      const timer = this.logger.startTimer('Daily Content Generation');
-      
-      // Check if we should generate content today
-      const shouldGenerate = await this.shouldGenerateContentToday();
-      
-      if (!shouldGenerate) {
-        this.logger.info('Skipping content generation - sufficient content in pipeline');
-        return;
-      }
-
-      if (this.generateContent) {
-        const job = await this.generateContent({ source: 'scheduler' });
-        await this.db.setSetting('last_content_generation', new Date().toISOString());
+      this.logger.info('Starting daily content generation across all active channels...');
+      const channels = await this.db.listChannels();
+      const eligible = channels.filter(channel => channel.status === 'active' && !channel.automationPaused);
+      if (!eligible.length) {
+        this.logger.info('No active, connected channels are eligible for scheduled generation.');
         timer.end();
-        this.logger.success(`Daily content generation queued: ${job.id}`);
-        await this.logAutomationEvent('daily_content_generation', 'queued', { jobId: job.id });
         return;
       }
 
-      // Generate content strategy
-      const strategy = await this.agents.strategy.generateContentStrategy();
-      this.logger.info(`Generated strategy: ${strategy.topic}`);
-
-      // Generate script
-      const script = await this.agents.scriptWriter.generateScript(strategy);
-      this.logger.info(`Generated script: ${script.title}`);
-
-      // Generate thumbnail
-      const thumbnail = await this.agents.thumbnailDesigner.generateThumbnail(script);
-      this.logger.info('Generated thumbnail');
-
-      // Optimize SEO
-      const seoData = await this.agents.seoOptimizer.optimize(script, strategy);
-      this.logger.info('Completed SEO optimization');
-
-      // Process through production
-      const productionData = await this.agents.production.processContent({
-        strategy,
-        script,
-        thumbnail,
-        seo: seoData
-      });
-      this.logger.info(`Production completed: ${productionData.id}`);
-
-      // Schedule for publishing (returns null when only placeholder assets were produced)
-      const scheduleEntry = await this.agents.publishing.scheduleContent(productionData);
-      if (scheduleEntry) {
-        this.logger.info('Content scheduled for publishing');
-      } else {
-        this.logger.warn('Content was NOT scheduled — production produced placeholder assets. See warnings above.');
+      for (const channel of eligible) {
+        try {
+          const shouldGenerate = await this.shouldGenerateContentToday(channel.id);
+          if (!shouldGenerate) {
+            this.logger.info(`Skipping "${channel.name}" — sufficient content in pipeline or cadence already met`);
+            continue;
+          }
+          if (!this.generateContent) continue;
+          const job = await this.generateContent({ source: 'scheduler', channelId: channel.id });
+          await this.db.setSetting(`last_content_generation:${channel.id}`, new Date().toISOString());
+          this.logger.success(`Daily content generation queued for "${channel.name}": ${job.id}`);
+          await this.logAutomationEvent('daily_content_generation', 'queued', { jobId: job.id, channelId: channel.id, channelName: channel.name });
+        } catch (error) {
+          this.logger.error(`Daily content generation failed for "${channel.name}":`, error);
+          await this.logAutomationEvent('daily_content_generation', 'error', { error: error.message, channelId: channel.id, channelName: channel.name });
+          await this.sendFailureNotification(`Daily Content Generation — ${channel.name}`, error);
+        }
       }
 
       timer.end();
-      this.logger.success('Daily content generation completed successfully');
-
-      // Log the event
-      await this.logAutomationEvent('daily_content_generation', 'success', {
-        contentId: productionData.id,
-        topic: strategy.topic,
-        scheduledFor: productionData.scheduledPublishTime
-      });
-
+      this.logger.success('Daily content generation pass completed');
     } catch (error) {
+      timer.end();
       this.logger.error('Daily content generation failed:', error);
-      
-      await this.logAutomationEvent('daily_content_generation', 'error', {
-        error: error.message
-      });
-
-      // Send notification about failure
+      await this.logAutomationEvent('daily_content_generation', 'error', { error: error.message });
       await this.sendFailureNotification('Daily Content Generation', error);
     }
   }
 
-  async shouldGenerateContentToday() {
+  async shouldGenerateContentToday(channelId) {
     // Check content buffer
-    const upcomingContent = await this.agents.publishing.getUpcomingSchedule(3);
+    const upcomingContent = await this.db.getUpcomingSchedule(3, channelId);
     const bufferDays = parseInt(await this.db.getSetting('content_buffer_days')) || 3;
-    
+
     // Check if we have enough content scheduled
     if (upcomingContent.length >= bufferDays) {
       return false;
     }
 
     // Check posting frequency settings
-    const lastGeneration = await this.db.getSetting('last_content_generation');
-    const channelStrategy = this.db.getChannelStrategy ? await this.db.getChannelStrategy() : null;
+    const lastGeneration = await this.db.getSetting(`last_content_generation:${channelId}`);
+    const channelStrategy = await this.db.getChannelStrategy(channelId);
 
     if (channelStrategy?.status === 'active') {
       const weeklyOutput = await this.db.getRow(
         `SELECT COUNT(*) AS count FROM generation_jobs
-         WHERE source = 'autonomous_operator' AND status = 'completed'
-         AND created_at >= datetime('now', '-7 days')`
+         WHERE source = 'autonomous_operator' AND status = 'completed' AND channel_id = ?
+         AND created_at >= datetime('now', '-7 days')`,
+        [channelId]
       );
       if (Number(weeklyOutput?.count || 0) >= channelStrategy.cadence_per_week) return false;
       if (!lastGeneration) return true;
@@ -214,12 +178,12 @@ class DailyAutomation {
     }
 
     const frequency = await this.db.getSetting('posting_frequency') || 'daily';
-    
+
     if (lastGeneration) {
       const lastDate = new Date(lastGeneration);
       const today = new Date();
       const daysSinceLastGeneration = Math.floor((today - lastDate) / (1000 * 60 * 60 * 24));
-      
+
       switch (frequency) {
         case 'daily':
           return daysSinceLastGeneration >= 1;

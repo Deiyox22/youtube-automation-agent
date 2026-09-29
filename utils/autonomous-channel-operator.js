@@ -18,19 +18,28 @@ class AutonomousChannelOperator {
       error.status = 409;
       throw error;
     }
-    const active = await this.db.getActiveOperatorRun();
-    if (active || this.activeRuns.size) {
-      const error = new Error('An autonomous operator run is already active');
+    if (!strategy.channel_id) {
+      const error = new Error('This strategy is not attached to a channel');
+      error.status = 409;
+      throw error;
+    }
+    const active = await this.db.getActiveOperatorRun(strategy.channel_id);
+    if (active || this.activeRunsByChannel(strategy.channel_id).length) {
+      const error = new Error('An autonomous operator run is already active for this channel');
       error.status = 409;
       throw error;
     }
 
-    const run = await this.db.createOperatorRun(strategy.id);
+    const run = await this.db.createOperatorRun(strategy.id, strategy.channel_id);
     const work = this.execute(run.id, strategy)
       .catch(error => this.logger.error(`Operator run ${run.id} failed:`, error))
       .finally(() => this.activeRuns.delete(run.id));
-    this.activeRuns.set(run.id, work);
+    this.activeRuns.set(run.id, { channelId: strategy.channel_id, work });
     return run;
+  }
+
+  activeRunsByChannel(channelId) {
+    return [...this.activeRuns.entries()].filter(([, entry]) => entry.channelId === channelId);
   }
 
   async resume(runId, strategy) {
@@ -50,9 +59,9 @@ class AutonomousChannelOperator {
       error.status = 409;
       throw error;
     }
-    const active = await this.db.getActiveOperatorRun();
-    if (active || this.activeRuns.size) {
-      const error = new Error('An autonomous operator run is already active');
+    const active = await this.db.getActiveOperatorRun(strategy.channel_id);
+    if (active || this.activeRunsByChannel(strategy.channel_id).length) {
+      const error = new Error('An autonomous operator run is already active for this channel');
       error.status = 409;
       throw error;
     }
@@ -66,7 +75,7 @@ class AutonomousChannelOperator {
     const work = this.execute(runId, strategy, { resume: true })
       .catch(error => this.logger.error(`Resumed operator run ${runId} failed:`, error))
       .finally(() => this.activeRuns.delete(runId));
-    this.activeRuns.set(runId, work);
+    this.activeRuns.set(runId, { channelId: strategy.channel_id, work });
     return this.db.getOperatorRun(runId);
   }
 

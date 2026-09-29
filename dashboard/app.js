@@ -5,8 +5,19 @@ const ui = {
   toastTimer: null,
   retentionSnapshotId: null,
   engagementVideoId: null,
-  engagementDetail: null
+  engagementDetail: null,
+  activeChannelId: (() => {
+    try { return localStorage.getItem('yaa_active_channel') || null; } catch { return null; }
+  })()
 };
+
+function setActiveChannel(channelId) {
+  ui.activeChannelId = channelId || null;
+  try {
+    if (channelId) localStorage.setItem('yaa_active_channel', channelId);
+    else localStorage.removeItem('yaa_active_channel');
+  } catch { /* private browsing / storage disabled */ }
+}
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -160,7 +171,17 @@ async function refreshDashboard(silent = false) {
   ui.refreshing = true;
   if (!silent) $('#loading').classList.add('active');
   try {
-    ui.state = await api('/api/dashboard');
+    const query = ui.activeChannelId ? `?channelId=${encodeURIComponent(ui.activeChannelId)}` : '';
+    ui.state = await api(`/api/dashboard${query}`);
+    if (!ui.activeChannelId && ui.state.channels?.length) {
+      setActiveChannel(ui.state.channels[0].id);
+      ui.state = await api(`/api/dashboard?channelId=${encodeURIComponent(ui.activeChannelId)}`);
+    } else if (ui.activeChannelId && !ui.state.channels?.some(channel => channel.id === ui.activeChannelId)) {
+      // The remembered channel was deleted elsewhere; fall back cleanly.
+      setActiveChannel(ui.state.channels?.[0]?.id || null);
+      const fallbackQuery = ui.activeChannelId ? `?channelId=${encodeURIComponent(ui.activeChannelId)}` : '';
+      ui.state = await api(`/api/dashboard${fallbackQuery}`);
+    }
     renderDashboard();
   } catch (error) {
     $('#system-label').textContent = 'Tableau de bord indisponible';
@@ -210,6 +231,19 @@ function renderDashboard() {
   renderOperator(state.channelStrategy, state.operatorRuns || [], { ...state.system, readiness: state.readiness });
   populateSettings(state.profile, state.settings, state.system.videoProviders || []);
   renderChannels(state.channels || []);
+  renderChannelSwitcher(state.channels || []);
+}
+
+function renderChannelSwitcher(channels) {
+  const select = $('#active-channel-select');
+  if (!select) return;
+  if (!channels.length) {
+    select.innerHTML = '<option value="">Aucune chaîne</option>';
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  select.innerHTML = channels.map(channel => `<option value="${escapeHTML(channel.id)}" ${channel.id === ui.activeChannelId ? 'selected' : ''}>${escapeHTML(channel.youtube_channel_title || channel.name)}${channel.status !== 'active' ? ' (non connectée)' : ''}</option>`).join('');
 }
 
 const CHANNEL_LANGUAGE_LABELS = { fr: 'Français', en: 'Anglais', es: 'Espagnol', de: 'Allemand', it: 'Italien', pt: 'Portugais', nl: 'Néerlandais' };
@@ -1739,6 +1773,10 @@ document.addEventListener('click', async event => {
 });
 
 document.addEventListener('change', event => {
+  if (event.target.matches('#active-channel-select')) {
+    setActiveChannel(event.target.value || null);
+    refreshDashboard();
+  }
   if (event.target.matches('#retention-snapshot-select')) {
     ui.retentionSnapshotId = event.target.value;
     renderRetention(ui.state?.learning?.retention || {});
@@ -1815,6 +1853,7 @@ function strategyFormData(status = ui.state?.channelStrategy?.status || 'draft')
   const values = Object.fromEntries(new FormData(form));
   return {
     ...values,
+    channelId: ui.activeChannelId,
     contentPillars: values.contentPillars.split(',').map(value => value.trim()).filter(Boolean),
     cadencePerWeek: Number(values.cadencePerWeek),
     videosPerRun: Number(values.videosPerRun),
@@ -1836,7 +1875,7 @@ $('#activate-operator-button').addEventListener('click', async () => {
 });
 
 $('#pause-operator-button').addEventListener('click', async () => {
-  await mutate('/api/operator/pause', 'POST', {}, 'Opérateur autonome mis en pause.').catch(() => {});
+  await mutate('/api/operator/pause', 'POST', { channelId: ui.activeChannelId }, 'Opérateur autonome mis en pause.').catch(() => {});
 });
 
 $('#cancel-operator-run').addEventListener('click', async event => {
@@ -1856,8 +1895,9 @@ $('#resume-operator-run').addEventListener('click', async event => {
 $('#generate-form').addEventListener('submit', async event => {
   event.preventDefault();
   const values = Object.fromEntries(new FormData(event.currentTarget));
+  if (!ui.activeChannelId) return showToast('Choisissez une chaîne active avant de générer une vidéo.', 'error');
   try {
-    await mutate('/generate', 'POST', { ...values, topic: values.topic.trim() || null }, 'Tâche de génération démarrée.');
+    await mutate('/generate', 'POST', { ...values, channelId: ui.activeChannelId, topic: values.topic.trim() || null }, 'Tâche de génération démarrée.');
     $('#generate-dialog').close();
     event.currentTarget.reset();
   } catch (_error) { /* toast already shown */ }
@@ -1867,7 +1907,7 @@ $('#idea-form').addEventListener('submit', async event => {
   event.preventDefault();
   const values = Object.fromEntries(new FormData(event.currentTarget));
   try {
-    await mutate('/api/ideas', 'POST', values, 'Idée ajoutée au backlog.');
+    await mutate('/api/ideas', 'POST', { ...values, channelId: ui.activeChannelId }, 'Idée ajoutée au backlog.');
     $('#idea-dialog').close();
     event.currentTarget.reset();
   } catch (_error) { /* toast already shown */ }
