@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs').promises;
 const { Logger } = require('./utils/logger');
@@ -226,6 +227,57 @@ class YouTubeAutomationAgent {
     };
   }
 
+  static safeEqual(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    if (bufA.length !== bufB.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(bufA, bufB);
+  }
+
+  // Gates the entire dashboard (UI + all API routes) behind HTTP Basic Auth.
+  // Without DASHBOARD_USERNAME/DASHBOARD_PASSWORD set, the app stays publicly
+  // reachable by anyone with the URL, same as before this middleware existed.
+  requireDashboardAuth() {
+    return (req, res, next) => {
+      if (req.path === '/health') {
+        return next();
+      }
+
+      const expectedUser = process.env.DASHBOARD_USERNAME;
+      const expectedPass = process.env.DASHBOARD_PASSWORD;
+      if (!expectedUser || !expectedPass) {
+        return next();
+      }
+
+      const header = req.get('authorization') || '';
+      const [scheme, encoded] = header.split(' ');
+      if (scheme === 'Basic' && encoded) {
+        let decoded = '';
+        try {
+          decoded = Buffer.from(encoded, 'base64').toString('utf8');
+        } catch {
+          decoded = '';
+        }
+        const separatorIndex = decoded.indexOf(':');
+        if (separatorIndex !== -1) {
+          const providedUser = decoded.slice(0, separatorIndex);
+          const providedPass = decoded.slice(separatorIndex + 1);
+          if (
+            YouTubeAutomationAgent.safeEqual(providedUser, expectedUser) &&
+            YouTubeAutomationAgent.safeEqual(providedPass, expectedPass)
+          ) {
+            return next();
+          }
+        }
+      }
+
+      res.set('WWW-Authenticate', 'Basic realm="AgentTube Dashboard"');
+      return res.status(401).send('Authentication required');
+    };
+  }
+
   validateGenerateRequestBody(body = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return { valid: false, status: 400, error: 'Request body must be a JSON object' };
@@ -373,6 +425,10 @@ class YouTubeAutomationAgent {
     };
   }
   setupAPI() {
+    if (!process.env.DASHBOARD_USERNAME || !process.env.DASHBOARD_PASSWORD) {
+      this.logger.warn('DASHBOARD_USERNAME/DASHBOARD_PASSWORD are not set; the dashboard is publicly reachable by anyone with the URL');
+    }
+    this.app.use(this.requireDashboardAuth());
     this.app.use(express.json({ limit: '1mb' }));
     this.app.use(express.static(path.join(__dirname, 'dashboard')));
 
