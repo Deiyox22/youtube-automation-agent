@@ -450,8 +450,8 @@ class YouTubeAutomationAgent {
       const config = this.credentials?.getYouTubeOAuthConfig?.();
       if (!config) {
         return res.status(400).send(
-          'YouTube OAuth is not configured. Set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, ' +
-          'and YOUTUBE_REDIRECT_URI (pointing at this app\'s /auth/youtube/callback URL) first.'
+          'L’authentification YouTube n’est pas configurée. Définissez d’abord YOUTUBE_CLIENT_ID, ' +
+          'YOUTUBE_CLIENT_SECRET et YOUTUBE_REDIRECT_URI (pointant vers l’URL /auth/youtube/callback de cette application).'
         );
       }
       const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
@@ -472,14 +472,14 @@ class YouTubeAutomationAgent {
     this.app.get('/auth/youtube/callback', async (req, res) => {
       const { code, error } = req.query;
       if (error) {
-        return res.status(400).send(`<h1>Authorization error</h1><p>${error}</p>`);
+        return res.status(400).send(`<h1>Erreur d’autorisation</h1><p>${error}</p>`);
       }
       if (!code) {
-        return res.status(400).send('<h1>Missing authorization code</h1>');
+        return res.status(400).send('<h1>Code d’autorisation manquant</h1>');
       }
       const config = this.credentials?.getYouTubeOAuthConfig?.();
       if (!config) {
-        return res.status(400).send('<h1>YouTube OAuth is not configured</h1>');
+        return res.status(400).send('<h1>L’authentification YouTube n’est pas configurée</h1>');
       }
       try {
         const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
@@ -487,15 +487,26 @@ class YouTubeAutomationAgent {
         await this.credentials.saveYouTubeTokens(tokens);
         res.send(`
           <html><body style="font-family:Arial,sans-serif;text-align:center;padding:50px;">
-            <h1>✅ YouTube connected</h1>
-            <p>The app is restarting to apply this. Wait about 15&ndash;30 seconds, then refresh the dashboard.</p>
+            <h1>✅ YouTube connecté</h1>
+            <p>L’application redémarre pour appliquer ce changement. Vous allez être redirigé(e) automatiquement dans <span id="countdown">20</span>s.</p>
+            <p><strong>N’actualisez pas cette page</strong> — cliquez plutôt sur le lien ci-dessous si vous ne voulez pas attendre.</p>
+            <p><a href="/">Aller au tableau de bord →</a></p>
+            <script>
+              let s = 20;
+              const el = document.getElementById('countdown');
+              const timer = setInterval(() => {
+                s -= 1;
+                if (el) el.textContent = String(Math.max(s, 0));
+                if (s <= 0) { clearInterval(timer); window.location.href = '/'; }
+              }, 1000);
+            </script>
           </body></html>
         `);
         this.logger.info('YouTube OAuth completed via hosted callback; restarting process to load it.');
         setTimeout(() => process.exit(0), 1500);
       } catch (tokenError) {
         this.logger.error('YouTube token exchange failed', tokenError);
-        return res.status(500).send(`<h1>Token exchange failed</h1><p>${tokenError.message}</p>`);
+        return res.status(500).send(`<h1>Échec de l’échange du jeton</h1><p>${tokenError.message}</p><p>Cette erreur "invalid_grant" apparaît généralement quand cette page de callback a été rechargée (le code d’autorisation à usage unique a déjà été utilisé). Si un message "✅ YouTube connecté" est déjà apparu avant cette erreur, la connexion précédente reste valide — retournez simplement au <a href="/">tableau de bord</a>. Sinon, relancez la connexion depuis <a href="/auth/youtube/start">/auth/youtube/start</a> sans recharger la page de résultat.</p>`);
       }
     });
 
