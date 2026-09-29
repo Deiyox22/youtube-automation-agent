@@ -25,6 +25,7 @@
       <p class="sidebar-label" aria-hidden="true">Espace de travail</p>
       <nav aria-label="Navigation principale">
         <button class="nav-item active" data-view="overview"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7.5" height="9.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="1.5"/><rect x="13.5" y="11.5" width="7.5" height="9.5" rx="1.5"/><rect x="3" y="15.5" width="7.5" height="5.5" rx="1.5"/></svg> Vue d'ensemble</button>
+        <button class="nav-item" data-view="channels"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="4.5" rx="1.3"/><rect x="4" y="9.75" width="16" height="4.5" rx="1.3"/><rect x="4" y="15.5" width="16" height="4.5" rx="1.3"/></svg> Chaînes</button>
         <button class="nav-item" data-view="operator"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg> Opérateur autonome</button>
         <button class="nav-item" data-view="pipeline"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17.5" cy="6" r="2"/><circle cx="14.5" cy="18" r="2"/></svg> Pipeline <b id="review-badge" class="badge hidden">0</b></button>
         <button class="nav-item" data-view="calendar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="16.5" rx="2"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4M7.5 13.5h3v3h-3z"/></svg> Calendrier et idées</button>
@@ -84,6 +85,11 @@
             <div id="notification-list" class="activity-list"></div>
           </article>
         </div>
+      </section>
+
+      <section id="channels-view" class="view">
+        <div class="split-heading"><div><h2>Chaînes gérées</h2><p>Connectez plusieurs chaînes YouTube et laissez chacune tourner en autonome, indépendamment des autres.</p></div><button id="add-channel-button" class="button secondary">＋ Ajouter une chaîne</button></div>
+        <div id="channels-list" class="channels-grid"></div>
       </section>
 
       <section id="operator-view" class="view">
@@ -324,6 +330,21 @@
       <label><span>Pourquoi ça vaut la peine d'être fait</span><textarea name="rationale" rows="2"></textarea></label>
       <label><span>Format</span><select name="style"><option value="explainer">Explicatif</option><option value="tutorial">Tutoriel</option><option value="list">Liste</option><option value="review">Critique</option><option value="story">Récit</option></select></label>
       <div class="form-actions"><button type="submit" class="button primary">Ajouter à la liste d'attente</button><button type="button" class="button ghost" data-close>Annuler</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="channel-dialog" class="dialog">
+    <form id="channel-form" method="dialog">
+      <div class="dialog-heading"><div><p class="eyebrow" id="channel-dialog-eyebrow">NOUVELLE CHAÎNE</p><h2 id="channel-dialog-title">Ajouter une chaîne</h2></div><button type="button" class="close-button" data-close>×</button></div>
+      <input type="hidden" name="channelId">
+      <label><span>Nom de la chaîne</span><input name="name" maxlength="120" required></label>
+      <div class="form-grid two">
+        <label><span>Langue du contenu</span><select name="language"><option value="fr">Français</option><option value="en">Anglais</option><option value="es">Espagnol</option><option value="de">Allemand</option><option value="it">Italien</option><option value="pt">Portugais</option><option value="nl">Néerlandais</option></select></label>
+        <label><span>Format par défaut</span><select name="defaultStyle"><option value="explainer">Explicatif</option><option value="tutorial">Tutoriel</option><option value="list">Liste</option><option value="review">Critique</option><option value="story">Récit</option></select></label>
+      </div>
+      <label class="full-row"><span>Objectif de la chaîne</span><textarea name="goal" rows="2"></textarea></label>
+      <label class="full-row"><span>Public cible</span><textarea name="targetAudience" rows="2"></textarea></label>
+      <div class="form-actions"><button type="submit" class="button primary" id="channel-form-submit">Créer la chaîne</button><button type="button" class="button ghost" data-close>Annuler</button></div>
     </form>
   </dialog>
 

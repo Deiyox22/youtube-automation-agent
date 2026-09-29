@@ -617,6 +617,31 @@ class Database {
         completed_at TEXT NOT NULL,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
       )`,
+      // Multi-channel: one row per managed YouTube channel. The OAuth
+      // client (YOUTUBE_CLIENT_ID/SECRET) stays global/shared — only the
+      // resulting tokens are per channel, since one Google Cloud OAuth
+      // client can grant tokens for any number of separate Google accounts.
+      `CREATE TABLE IF NOT EXISTS channels (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'needs_auth',
+        channel_name TEXT,
+        goal TEXT,
+        target_audience TEXT,
+        brand_voice TEXT,
+        default_style TEXT DEFAULT 'explainer',
+        call_to_action TEXT,
+        banned_topics TEXT DEFAULT '[]',
+        visual_style TEXT,
+        timezone TEXT DEFAULT 'America/Chicago',
+        content_language TEXT DEFAULT 'fr',
+        youtube_tokens TEXT,
+        youtube_channel_id TEXT,
+        youtube_channel_title TEXT,
+        automation_paused INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )`,
             // System Settings
       `CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -1594,6 +1619,100 @@ class Database {
       ]
     );
     return this.getChannelProfile();
+  }
+
+  formatChannelRow(row) {
+    if (!row) return null;
+    return {
+      ...row,
+      bannedTopics: JSON.parse(row.banned_topics || '[]'),
+      youtubeTokens: row.youtube_tokens ? JSON.parse(row.youtube_tokens) : null,
+      automationPaused: Boolean(row.automation_paused)
+    };
+  }
+
+  async listChannels() {
+    const rows = await this.getAllRows('SELECT * FROM channels ORDER BY created_at ASC');
+    return rows.map(row => this.formatChannelRow(row));
+  }
+
+  async getChannelById(id) {
+    const row = await this.getRow('SELECT * FROM channels WHERE id = ?', [id]);
+    return this.formatChannelRow(row);
+  }
+
+  async createChannel(input = {}) {
+    const id = this.generateId('channel');
+    await this.executeQuery(
+      `INSERT INTO channels (
+        id, name, status, channel_name, goal, target_audience, brand_voice, default_style,
+        call_to_action, banned_topics, visual_style, timezone, content_language
+      ) VALUES (?, ?, 'needs_auth', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        String(input.name || 'Untitled channel').trim().slice(0, 120),
+        input.channelName ?? input.name ?? '',
+        input.goal ?? '',
+        input.targetAudience ?? '',
+        input.brandVoice ?? '',
+        input.defaultStyle ?? 'explainer',
+        input.callToAction ?? '',
+        JSON.stringify(input.bannedTopics ?? []),
+        input.visualStyle ?? '',
+        input.timezone ?? 'America/Chicago',
+        input.language ?? 'fr'
+      ]
+    );
+    return this.getChannelById(id);
+  }
+
+  async updateChannel(id, input = {}) {
+    const current = await this.getChannelById(id);
+    if (!current) return null;
+    const fieldMap = {
+      name: 'name', channelName: 'channel_name', goal: 'goal', targetAudience: 'target_audience',
+      brandVoice: 'brand_voice', defaultStyle: 'default_style', callToAction: 'call_to_action',
+      visualStyle: 'visual_style', timezone: 'timezone', language: 'content_language'
+    };
+    const sets = [];
+    const params = [];
+    for (const [inputKey, column] of Object.entries(fieldMap)) {
+      if (input[inputKey] !== undefined) {
+        sets.push(`${column} = ?`);
+        params.push(input[inputKey]);
+      }
+    }
+    if (input.bannedTopics !== undefined) {
+      sets.push('banned_topics = ?');
+      params.push(JSON.stringify(input.bannedTopics));
+    }
+    if (input.automationPaused !== undefined) {
+      sets.push('automation_paused = ?');
+      params.push(input.automationPaused ? 1 : 0);
+    }
+    if (!sets.length) return current;
+    sets.push("updated_at = datetime('now')");
+    params.push(id);
+    await this.executeQuery(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`, params);
+    return this.getChannelById(id);
+  }
+
+  async deleteChannel(id) {
+    await this.executeQuery('DELETE FROM channels WHERE id = ?', [id]);
+  }
+
+  async saveChannelYouTubeTokens(id, tokens, youtubeChannel = null) {
+    const current = await this.getChannelById(id);
+    const merged = { ...(current?.youtubeTokens || {}), ...tokens };
+    await this.executeQuery(
+      `UPDATE channels SET youtube_tokens = ?, status = 'active',
+        youtube_channel_id = COALESCE(?, youtube_channel_id),
+        youtube_channel_title = COALESCE(?, youtube_channel_title),
+        updated_at = datetime('now')
+       WHERE id = ?`,
+      [JSON.stringify(merged), youtubeChannel?.id || null, youtubeChannel?.title || null, id]
+    );
+    return this.getChannelById(id);
   }
 
   async createContentIdea(idea) {

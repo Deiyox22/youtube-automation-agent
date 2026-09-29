@@ -92,7 +92,8 @@ class YouTubeAutomationAgent {
       this.credentials = new CredentialManager();
       const credentialsValid = await this.credentials.validateAll();
       this.readiness = new ProductionReadinessService(this.db, this.credentials);
-      
+      await this.migrateLegacyChannelIfNeeded();
+
       if (!credentialsValid) {
         console.log(chalk.yellow('\n⚠️  Some credentials are missing or invalid.'));
         console.log(chalk.yellow('Run: npm run credentials:setup'));
@@ -452,8 +453,12 @@ class YouTubeAutomationAgent {
     // Hosted YouTube OAuth (no local terminal required): configure
     // YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REDIRECT_URI (a
     // "Web application" OAuth client, redirect URI = <this app's public
-    // URL>/auth/youtube/callback), then visit /auth/youtube/start once.
-    this.app.get('/auth/youtube/start', (req, res) => {
+    // URL>/auth/youtube/callback) once — that one OAuth client is reused to
+    // connect any number of separate channels/Google accounts, each
+    // producing its own token. Pass ?channelId=<id> to connect a specific
+    // channel from the Chaînes screen; omit it for the legacy single-channel
+    // flow.
+    this.app.get('/auth/youtube/start', async (req, res) => {
       const config = this.credentials?.getYouTubeOAuthConfig?.();
       if (!config) {
         return res.status(400).send(
@@ -461,10 +466,15 @@ class YouTubeAutomationAgent {
           'YOUTUBE_CLIENT_SECRET et YOUTUBE_REDIRECT_URI (pointant vers l’URL /auth/youtube/callback de cette application).'
         );
       }
+      const channelId = req.query.channelId ? String(req.query.channelId) : null;
+      if (channelId && !(await this.db.getChannelById(channelId))) {
+        return res.status(404).send('<h1>Chaîne introuvable</h1>');
+      }
       const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
       const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
         prompt: 'consent',
+        ...(channelId ? { state: channelId } : {}),
         scope: [
           'https://www.googleapis.com/auth/youtube.upload',
           'https://www.googleapis.com/auth/youtube',
@@ -477,7 +487,7 @@ class YouTubeAutomationAgent {
     });
 
     this.app.get('/auth/youtube/callback', async (req, res) => {
-      const { code, error } = req.query;
+      const { code, error, state } = req.query;
       if (error) {
         return res.status(400).send(`<h1>Erreur d’autorisation</h1><p>${error}</p>`);
       }
@@ -488,12 +498,37 @@ class YouTubeAutomationAgent {
       if (!config) {
         return res.status(400).send('<h1>L’authentification YouTube n’est pas configurée</h1>');
       }
+      const escapeHTML = value => String(value ?? '')
+        .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+      const channelId = state ? String(state) : null;
       try {
         const oauth2Client = new google.auth.OAuth2(config.clientId, config.clientSecret, config.redirectUri);
         const { tokens } = await oauth2Client.getToken(code);
+
+        if (channelId) {
+          const channel = await this.db.getChannelById(channelId);
+          if (!channel) return res.status(404).send('<h1>Chaîne introuvable</h1>');
+          let youtubeChannel = null;
+          try {
+            oauth2Client.setCredentials(tokens);
+            const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+            const response = await youtube.channels.list({ part: 'snippet', mine: true });
+            const item = response.data?.items?.[0];
+            if (item) youtubeChannel = { id: item.id, title: item.snippet?.title };
+          } catch (lookupError) {
+            this.logger.warn(`Could not look up the connected channel's title: ${lookupError.message}`);
+          }
+          await this.db.saveChannelYouTubeTokens(channelId, tokens, youtubeChannel);
+          return res.send(`
+            <html><body style="font-family:Arial,sans-serif;text-align:center;padding:50px;">
+              <h1>✅ ${escapeHTML(youtubeChannel?.title || channel.name)} connectée</h1>
+              <p>Cette chaîne est prête. Vous pouvez fermer cette page.</p>
+              <p><a href="/#channels">Retour aux chaînes →</a></p>
+            </body></html>
+          `);
+        }
+
         await this.credentials.saveYouTubeTokens(tokens);
-        const escapeHTML = value => String(value ?? '')
-          .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
         const persistenceNotice = tokens.refresh_token ? `
             <div style="text-align:left;max-width:640px;margin:24px auto;padding:16px 20px;border:1px solid #e0a800;border-radius:8px;background:#fff8e1;">
               <p><strong>Important si vous êtes hébergé·e sur un disque non persistant (ex. Render gratuit) :</strong>
@@ -526,7 +561,7 @@ class YouTubeAutomationAgent {
         setTimeout(() => process.exit(0), 1500);
       } catch (tokenError) {
         this.logger.error('YouTube token exchange failed', tokenError);
-        return res.status(500).send(`<h1>Échec de l’échange du jeton</h1><p>${tokenError.message}</p><p>Cette erreur "invalid_grant" apparaît généralement quand cette page de callback a été rechargée (le code d’autorisation à usage unique a déjà été utilisé). Si un message "✅ YouTube connecté" est déjà apparu avant cette erreur, la connexion précédente reste valide — retournez simplement au <a href="/">tableau de bord</a>. Sinon, relancez la connexion depuis <a href="/auth/youtube/start">/auth/youtube/start</a> sans recharger la page de résultat.</p>`);
+        return res.status(500).send(`<h1>Échec de l’échange du jeton</h1><p>${tokenError.message}</p><p>Cette erreur "invalid_grant" apparaît généralement quand cette page de callback a été rechargée (le code d’autorisation à usage unique a déjà été utilisé). Si un message "✅ connectée" est déjà apparu avant cette erreur, la connexion précédente reste valide. Sinon, relancez la connexion sans recharger la page de résultat.</p>`);
       }
     });
 
@@ -679,7 +714,7 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
 
     this.app.get('/api/dashboard', async (_req, res) => {
       try {
-        const [stats, jobs, pipeline, schedule, events, notifications, profile, settings, ideas, analytics, learning, activation, channelStrategy, operatorRuns, readiness, engagement, experiments] = await Promise.all([
+        const [stats, jobs, pipeline, schedule, events, notifications, profile, settings, ideas, analytics, learning, activation, channelStrategy, operatorRuns, readiness, engagement, experiments, channels] = await Promise.all([
           this.db.getStats(),
           this.db.listGenerationJobs(20),
           this.db.getPipelineOverview(50),
@@ -713,12 +748,13 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
               }),
           this.experiments
             ? this.experiments.getSummary()
-            : Promise.resolve({ experiments: [], candidates: [], activeCount: 0, awaitingDecisionCount: 0, evidencePolicy: 'Finish setup to create a controlled growth experiment.' })
+            : Promise.resolve({ experiments: [], candidates: [], activeCount: 0, awaitingDecisionCount: 0, evidencePolicy: 'Finish setup to create a controlled growth experiment.' }),
+          this.db.listChannels()
         ]);
         if (this.telemetry) void this.telemetry.sync(activation);
         res.json({
           stats, jobs, pipeline, schedule, events, notifications, profile, settings, ideas, analytics, learning, activation,
-          channelStrategy, operatorRuns, readiness, engagement, experiments,
+          channelStrategy, operatorRuns, readiness, engagement, experiments, channels: channels.map(channel => this.sanitizeChannel(channel)),
           system: {
             initialized: this.isInitialized,
             setupRequired: this.setupRequired,
@@ -733,6 +769,38 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
       } catch (error) {
         res.status(500).json({ error: error.message });
       }
+    });
+
+    this.app.get('/api/channels', async (_req, res) => {
+      const channels = await this.db.listChannels();
+      res.json({ success: true, result: channels.map(channel => this.sanitizeChannel(channel)) });
+    });
+
+    this.app.post('/api/channels', protect, async (req, res) => {
+      try {
+        const input = this.validateChannelInput(req.body || {});
+        if (!input.name) return res.status(400).json({ success: false, error: 'A channel name is required' });
+        const channel = await this.db.createChannel(input);
+        res.status(201).json({ success: true, result: this.sanitizeChannel(channel) });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.patch('/api/channels/:channelId', protect, async (req, res) => {
+      try {
+        const input = this.validateChannelInput(req.body || {});
+        const channel = await this.db.updateChannel(req.params.channelId, input);
+        if (!channel) return res.status(404).json({ success: false, error: 'Channel not found' });
+        res.json({ success: true, result: this.sanitizeChannel(channel) });
+      } catch (error) {
+        res.status(400).json({ success: false, error: error.message });
+      }
+    });
+
+    this.app.delete('/api/channels/:channelId', protect, async (req, res) => {
+      await this.db.deleteChannel(req.params.channelId);
+      res.json({ success: true });
     });
 
     this.app.get('/api/jobs/:jobId', async (req, res) => {
@@ -1863,6 +1931,73 @@ ${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" 
     } catch (error) {
       this.logger.warn(`Packaging experiment preparation failed without blocking production: ${error.message}`);
       return null;
+    }
+  }
+
+  // Never send OAuth tokens to the browser — the connected/needs_auth
+  // status is all the dashboard needs to know.
+  sanitizeChannel(channel) {
+    if (!channel) return channel;
+    const { youtubeTokens, youtube_tokens: _youtubeTokensRaw, ...safe } = channel;
+    return { ...safe, youtubeConnected: Boolean(youtubeTokens?.refresh_token) };
+  }
+
+  validateChannelInput(input) {
+    const textFields = ['name', 'channelName', 'goal', 'targetAudience', 'brandVoice', 'defaultStyle', 'callToAction', 'visualStyle', 'timezone'];
+    const result = {};
+    for (const field of textFields) {
+      if (input[field] !== undefined) {
+        const value = String(input[field]).trim();
+        if (value.length > 500) throw new Error(`${field} is too long`);
+        result[field] = value;
+      }
+    }
+    if (input.bannedTopics !== undefined) {
+      const topics = Array.isArray(input.bannedTopics) ? input.bannedTopics : String(input.bannedTopics).split(',');
+      result.bannedTopics = topics.map(topic => String(topic).trim()).filter(Boolean).slice(0, 50);
+    }
+    if (input.language !== undefined) {
+      const language = String(input.language).trim().toLowerCase();
+      if (!isSupportedLanguage(language)) throw new Error('Unsupported content language');
+      result.language = language;
+    }
+    if (input.automationPaused !== undefined) {
+      result.automationPaused = Boolean(input.automationPaused);
+    }
+    return result;
+  }
+
+  // One-time upgrade path: the app used to support exactly one YouTube
+  // channel (config/channel_profiles + a single set of OAuth tokens). The
+  // first time it boots against the new multi-channel schema, fold that
+  // existing setup into the first row of `channels` so a channel that was
+  // already connected keeps working without re-authorizing.
+  async migrateLegacyChannelIfNeeded() {
+    try {
+      const existing = await this.db.listChannels();
+      if (existing.length) return;
+      const profile = await this.db.getChannelProfile();
+      const legacyTokens = this.credentials?.tokens?.youtube || null;
+      if (!profile && !legacyTokens) return;
+      const channel = await this.db.createChannel({
+        name: profile?.channel_name || 'My YouTube Channel',
+        channelName: profile?.channel_name,
+        goal: profile?.goal,
+        targetAudience: profile?.target_audience,
+        brandVoice: profile?.brand_voice,
+        defaultStyle: profile?.default_style,
+        callToAction: profile?.call_to_action,
+        bannedTopics: profile?.bannedTopics,
+        visualStyle: profile?.visual_style,
+        timezone: profile?.timezone,
+        language: profile?.content_language
+      });
+      if (legacyTokens) {
+        await this.db.saveChannelYouTubeTokens(channel.id, legacyTokens);
+      }
+      this.logger.info(`Migrated the existing single-channel setup into channel "${channel.name}" (${channel.id}).`);
+    } catch (error) {
+      this.logger.warn(`Legacy channel migration skipped: ${error.message}`);
     }
   }
 

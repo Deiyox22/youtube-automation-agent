@@ -84,6 +84,7 @@ function timeAgo(value) {
 
 const STATUS_LABELS = {
   unknown: 'inconnu',
+  needs_auth: 'authentification requise',
   queued: 'en file d’attente',
   running: 'en cours',
   failed: 'échoué',
@@ -208,6 +209,36 @@ function renderDashboard() {
   renderReadiness(state.readiness);
   renderOperator(state.channelStrategy, state.operatorRuns || [], { ...state.system, readiness: state.readiness });
   populateSettings(state.profile, state.settings, state.system.videoProviders || []);
+  renderChannels(state.channels || []);
+}
+
+const CHANNEL_LANGUAGE_LABELS = { fr: 'Français', en: 'Anglais', es: 'Espagnol', de: 'Allemand', it: 'Italien', pt: 'Portugais', nl: 'Néerlandais' };
+
+function renderChannels(channels) {
+  const container = $('#channels-list');
+  if (!container) return;
+  if (!channels.length) {
+    container.innerHTML = empty('Aucune chaîne pour le moment. Ajoutez-en une pour commencer.');
+    return;
+  }
+  container.innerHTML = channels.map(channel => `
+    <article class="panel channel-card" data-channel-id="${escapeHTML(channel.id)}">
+      <div class="channel-card-heading">
+        <div><strong>${escapeHTML(channel.name)}</strong><div class="meta-line">${statusChip(channel.status)}</div></div>
+      </div>
+      <div class="channel-card-meta">
+        <span>${escapeHTML(CHANNEL_LANGUAGE_LABELS[channel.content_language] || channel.content_language || 'Français')}</span>
+        <span>${escapeHTML(channel.goal || 'Aucun objectif défini')}</span>
+        ${channel.youtube_channel_title ? `<span>YouTube : ${escapeHTML(channel.youtube_channel_title)}</span>` : ''}
+      </div>
+      <div class="channel-card-actions">
+        ${channel.youtubeConnected
+          ? '<span class="status success">YouTube connectée</span>'
+          : `<a class="button secondary small" href="/auth/youtube/start?channelId=${encodeURIComponent(channel.id)}">Connecter YouTube</a>`}
+        <button type="button" class="text-button" data-edit-channel="${escapeHTML(channel.id)}">Modifier</button>
+        <button type="button" class="text-button danger-text" data-delete-channel="${escapeHTML(channel.id)}">Supprimer</button>
+      </div>
+    </article>`).join('');
 }
 
 function renderReadiness(readiness = {}) {
@@ -850,6 +881,7 @@ function switchView(view) {
   $$('.view').forEach(item => item.classList.toggle('active', item.id === `${view}-view`));
   const titles = {
     overview: ['VUE D’ENSEMBLE OPÉRATEUR', 'Sachez ce qui va se passer.'],
+    channels: ['CHAÎNES GÉRÉES', 'Une automatisation indépendante par chaîne.'],
     operator: ['OPÉRATEUR AUTONOME', 'Donnez la stratégie à Lumen.'],
     pipeline: ['OPÉRATIONS DE CONTENU', 'De l’idée à la publication.'],
     calendar: ['PLANIFICATION ÉDITORIALE', 'Planifiez avant de générer.'],
@@ -1660,6 +1692,31 @@ document.addEventListener('click', async event => {
     await mutate(`/api/content/${encodeURIComponent(retry.dataset.retryContent)}/retry`, 'POST', {}, 'Régénération démarrée.').catch(() => {});
     $('#content-dialog').close();
   }
+
+  const editChannel = event.target.closest('[data-edit-channel]');
+  if (editChannel) {
+    const channel = (ui.state?.channels || []).find(item => item.id === editChannel.dataset.editChannel);
+    if (!channel) return;
+    const form = $('#channel-form');
+    form.reset();
+    form.elements.channelId.value = channel.id;
+    form.elements.name.value = channel.name || '';
+    form.elements.language.value = channel.content_language || 'fr';
+    form.elements.defaultStyle.value = channel.default_style || 'explainer';
+    form.elements.goal.value = channel.goal || '';
+    form.elements.targetAudience.value = channel.target_audience || '';
+    $('#channel-dialog-eyebrow').textContent = 'MODIFIER LA CHAÎNE';
+    $('#channel-dialog-title').textContent = channel.name;
+    $('#channel-form-submit').textContent = 'Enregistrer les modifications';
+    $('#channel-dialog').showModal();
+    return;
+  }
+
+  const deleteChannel = event.target.closest('[data-delete-channel]');
+  if (deleteChannel) {
+    if (!confirm('Supprimer cette chaîne ? Sa connexion YouTube sera retirée. Le contenu déjà généré reste sur le disque.')) return;
+    await mutate(`/api/channels/${encodeURIComponent(deleteChannel.dataset.deleteChannel)}`, 'DELETE', undefined, 'Chaîne supprimée.').catch(() => {});
+  }
 });
 
 document.addEventListener('change', event => {
@@ -1689,6 +1746,15 @@ document.addEventListener('change', event => {
 
 $('#generate-button').addEventListener('click', () => $('#generate-dialog').showModal());
 $('#add-idea-button').addEventListener('click', () => $('#idea-dialog').showModal());
+$('#add-channel-button').addEventListener('click', () => {
+  const form = $('#channel-form');
+  form.reset();
+  form.elements.channelId.value = '';
+  $('#channel-dialog-eyebrow').textContent = 'NOUVELLE CHAÎNE';
+  $('#channel-dialog-title').textContent = 'Ajouter une chaîne';
+  $('#channel-form-submit').textContent = 'Créer la chaîne';
+  $('#channel-dialog').showModal();
+});
 $('#refresh-button').addEventListener('click', () => refreshDashboard());
 $('#pipeline-filter').addEventListener('change', () => renderPipeline(ui.state?.pipeline || []));
 
@@ -1788,6 +1854,22 @@ $('#idea-form').addEventListener('submit', async event => {
   } catch (_error) { /* toast already shown */ }
 });
 
+$('#channel-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const values = Object.fromEntries(new FormData(event.currentTarget));
+  const channelId = values.channelId;
+  delete values.channelId;
+  try {
+    if (channelId) {
+      await mutate(`/api/channels/${encodeURIComponent(channelId)}`, 'PATCH', values, 'Chaîne mise à jour.');
+    } else {
+      await mutate('/api/channels', 'POST', values, 'Chaîne créée. Connectez-la à YouTube pour l’activer.');
+    }
+    $('#channel-dialog').close();
+    event.currentTarget.reset();
+  } catch (_error) { /* toast already shown */ }
+});
+
 $('#profile-form').addEventListener('submit', async event => {
   event.preventDefault();
   const values = Object.fromEntries(new FormData(event.currentTarget));
@@ -1811,6 +1893,6 @@ $('#api-key-button').addEventListener('click', () => {
 });
 
 const initialView = location.hash.slice(1);
-if (['overview', 'operator', 'pipeline', 'calendar', 'analytics', 'engagement', 'readiness', 'settings'].includes(initialView)) switchView(initialView);
+if (['overview', 'channels', 'operator', 'pipeline', 'calendar', 'analytics', 'engagement', 'readiness', 'settings'].includes(initialView)) switchView(initialView);
 refreshDashboard();
 setInterval(() => refreshDashboard(true), 8000);

@@ -402,6 +402,14 @@ label:has(input:disabled) > span { color: var(--muted); }
 .pipeline-title span, .pipeline-col span { color: var(--muted); font-size: 10px; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .08em; }
 .pipeline-col strong { display: block; font-size: 13px; margin-top: 5px; font-weight: 600; }
 
+/* ============ Channels ============ */
+.channels-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+.channel-card { display: flex; flex-direction: column; gap: 10px; }
+.channel-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.channel-card-heading strong { font-size: 15px; line-height: 1.3; }
+.channel-card-meta { color: var(--muted); font-size: 12px; display: grid; gap: 4px; }
+.channel-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 8px; }
+
 /* ============ Calendar / operator ============ */
 .calendar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .operator-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .85fr); gap: 16px; align-items: start; }

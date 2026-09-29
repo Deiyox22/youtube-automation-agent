@@ -12,7 +12,7 @@
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   const MINI_LABELS = {
-    overview: 'Accueil', operator: 'Opérateur', pipeline: 'Pipeline',
+    overview: 'Accueil', channels: 'Chaînes', operator: 'Opérateur', pipeline: 'Pipeline',
     calendar: 'Calendrier', analytics: 'Stats', readiness: 'Vérifs', settings: 'Config'
   };
   function ensureMiniLabels() {
@@ -56,6 +56,7 @@
   /* ---------- 1. View choreography ---------- */
   const VIEW_META = {
     overview: ['VUE D’ENSEMBLE OPÉRATEUR', 'Sachez ce qui va se passer.', 'Vue d’ensemble'],
+    channels: ['CHAÎNES GÉRÉES', 'Une automatisation indépendante par chaîne.', 'Chaînes'],
     operator: ['OPÉRATEUR AUTONOME', 'Donnez la stratégie à Lumen.', 'Opérateur'],
     pipeline: ['OPÉRATIONS DE CONTENU', 'De l’idée à la publication.', 'Pipeline'],
     calendar: ['PLANIFICATION ÉDITORIALE', 'Planifiez avant de générer.', 'Calendrier'],
