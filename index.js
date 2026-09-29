@@ -240,9 +240,15 @@ class YouTubeAutomationAgent {
   // Gates the entire dashboard (UI + all API routes) behind HTTP Basic Auth.
   // Without DASHBOARD_USERNAME/DASHBOARD_PASSWORD set, the app stays publicly
   // reachable by anyone with the URL, same as before this middleware existed.
+  // Public-facing pages required for Google's OAuth verification review
+  // (homepage + privacy policy links, and domain-ownership verification)
+  // stay reachable without the dashboard password — they carry no
+  // operator data, and Google's reviewer/crawler cannot authenticate.
+  static PUBLIC_ROUTES = new Set(['/health', '/about', '/privacy']);
+
   requireDashboardAuth() {
     return (req, res, next) => {
-      if (req.path === '/health') {
+      if (YouTubeAutomationAgent.PUBLIC_ROUTES.has(req.path) || /^\/google[\w-]*\.html$/.test(req.path)) {
         return next();
       }
 
@@ -533,6 +539,66 @@ class YouTubeAutomationAgent {
         uptime: process.uptime(),
         timestamp: new Date().toISOString()
       });
+    });
+
+    // Public pages required by Google's OAuth verification review (an app
+    // homepage and a privacy policy, both reachable without the dashboard
+    // password since Google's reviewer/crawler has no way to authenticate).
+    const channelName = process.env.CHANNEL_NAME || 'ce projet';
+    const publicPage = (title, bodyHTML) => `<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+${process.env.GOOGLE_SITE_VERIFICATION ? `<meta name="google-site-verification" content="${process.env.GOOGLE_SITE_VERIFICATION}">` : ''}
+<style>body{font-family:system-ui,Arial,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;line-height:1.6;color:#1a1a1a}h1{margin-top:0}a{color:#c0392b}</style>
+</head><body>${bodyHTML}</body></html>`;
+
+    this.app.get('/about', (req, res) => {
+      res.send(publicPage('À propos', `
+        <h1>${channelName} — Automatisation YouTube</h1>
+        <p>Cette application est un outil personnel d'automatisation de production de contenu YouTube :
+        elle génère des scripts, des visuels et des vidéos à partir de sujets choisis par son opérateur,
+        puis les publie sur une seule chaîne YouTube après relecture et approbation humaine.</p>
+        <p>Elle utilise l'API YouTube Data uniquement pour le compte de la personne qui l'exploite,
+        afin de gérer sa propre chaîne (import des métadonnées, mise en ligne de vidéos, lecture des
+        statistiques et des commentaires, réponse aux commentaires).</p>
+        <p>Voir la <a href="/privacy">politique de confidentialité</a>.</p>
+        <p>Contact : ${process.env.DEFAULT_AUTHOR || 'l’opérateur de cette application'}.</p>`));
+    });
+
+    this.app.get('/privacy', (req, res) => {
+      res.send(publicPage('Politique de confidentialité', `
+        <h1>Politique de confidentialité</h1>
+        <p><small>Dernière mise à jour : ${new Date().toISOString().slice(0, 10)}</small></p>
+        <p>Cette application est un outil personnel, à usage individuel, exploité par le propriétaire
+        de la chaîne YouTube qu'elle gère. Elle n'est pas un service public et ne collecte aucune
+        donnée pour le compte de tiers.</p>
+        <h2>Données consultées via l'API YouTube</h2>
+        <p>Avec l'autorisation explicite de l'opérateur (via la connexion Google OAuth), l'application
+        accède aux données de sa propre chaîne YouTube : métadonnées de vidéos, statistiques
+        d'audience et de rétention, commentaires publiés sur ses vidéos. Ces données servent
+        uniquement à générer et publier du contenu sur cette même chaîne, et à produire des
+        recommandations d'amélioration pour l'opérateur.</p>
+        <h2>Partage des données</h2>
+        <p>Aucune donnée n'est vendue ni partagée avec des tiers à des fins publicitaires.
+        Le contenu textuel des scripts et sujets peut être transmis à des fournisseurs
+        d'intelligence artificielle (choisis et configurés par l'opérateur) dans le seul but de
+        générer scripts, visuels ou narration vocale.</p>
+        <h2>Conservation et suppression</h2>
+        <p>Les données sont conservées localement par l'opérateur tant que l'application est
+        utilisée. L'accès peut être révoqué à tout moment depuis
+        <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">la page des
+        autorisations du compte Google</a> de l'opérateur.</p>
+        <h2>Contact</h2>
+        <p>${process.env.DEFAULT_AUTHOR || 'L’opérateur de cette application'} — via le compte
+        Google associé à cette application.</p>`));
+    });
+
+    // Google Search Console domain-ownership verification (HTML file
+    // method): set GOOGLE_SITE_VERIFICATION_FILE to the exact filename
+    // Search Console gives you (e.g. "google1234567890abcdef.html").
+    this.app.get('/:file(google[\\w-]*\\.html)', (req, res, next) => {
+      if (req.params.file !== process.env.GOOGLE_SITE_VERIFICATION_FILE) return next();
+      res.type('text/html').send(`google-site-verification: ${req.params.file}`);
     });
 
     // Manual content generation
